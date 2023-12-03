@@ -156,9 +156,9 @@ bool swapchain_init(window *w, VkPhysicalDevice physical_device,
   swap_chain_support_details_free(&details);
   return true;
 fail_indices:
-    swap_chain_support_details_free(&details);
+  swap_chain_support_details_free(&details);
 fail_details:
-    return false;
+  return false;
 }
 
 void swapchain_free(VkDevice device, VkSwapchainKHR swapchain) {
@@ -253,4 +253,102 @@ void swapchain_image_views_destroy(VkDevice device, VkImageView *views,
   }
 
   free(views);
+}
+
+bool framebuffers_init(VkDevice device, u32 num_images,
+                       VkImageView *image_views, const VkExtent2D *extent,
+                       VkRenderPass render_pass, VkFramebuffer **framebuffers) {
+  *framebuffers = malloc(num_images * sizeof(VkFramebuffer));
+  if (!*framebuffers) {
+    LOG_ERROR("unable to allocate framebuffer handle array");
+    return false;
+  }
+
+  VkResult result;
+  u32 counter = 0;
+  while (counter < num_images) {
+    if ((result = vkCreateFramebuffer(
+             device,
+             &(VkFramebufferCreateInfo){
+                 .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                 .attachmentCount = 1,
+                 .pAttachments = &image_views[counter],
+                 .width = extent->width,
+                 .height = extent->height,
+                 .renderPass = render_pass,
+                 .layers = 1,
+             },
+             NULL, &(*framebuffers)[counter])) != VK_SUCCESS) {
+      LOG_ERROR("unable to create %" PRIu32 "-th framebuffer: %s", counter + 1,
+                vk_error_to_string(result));
+    }
+
+    ++counter;
+  }
+
+  return true;
+fail:
+  for (u32 i = 0; i < counter; ++i) {
+    vkDestroyFramebuffer(device, (*framebuffers)[i], NULL);
+  }
+
+  free(*framebuffers);
+  return false;
+}
+
+void framebuffers_free(VkDevice device, u32 num_images,
+                       VkFramebuffer *framebuffers) {
+  for (u32 i = 0; i < num_images; ++i) {
+    vkDestroyFramebuffer(device, framebuffers[i], NULL);
+  }
+
+  free(framebuffers);
+}
+
+bool present_sync_objects_init(VkDevice device, present_sync_objects *o) {
+  VkResult result;
+  if ((result = vkCreateSemaphore(
+           device,
+           &(VkSemaphoreCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+           },
+           NULL, &o->image_available)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create image available semaphore: %s",
+              vk_error_to_string(result));
+    goto fail_image_available_semaphore;
+  }
+  if ((result = vkCreateSemaphore(
+           device,
+           &(VkSemaphoreCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+           },
+           NULL, &o->render_finished)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create render finished semaphores: %s",
+              vk_error_to_string(result));
+    goto fail_render_finished_semaphore;
+  }
+  if ((result = vkCreateFence(device,
+                              &(VkFenceCreateInfo){
+                                  .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                                  .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+                              },
+                              NULL, &o->in_flight)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create render finished semaphores: %s",
+              vk_error_to_string(result));
+    goto fail_in_flight_fence;
+  }
+
+  return true;
+fail_in_flight_fence:
+  vkDestroySemaphore(device, o->render_finished, NULL);
+fail_render_finished_semaphore:
+  vkDestroySemaphore(device, o->image_available, NULL);
+fail_image_available_semaphore:
+  return false;
+}
+
+void present_sync_objects_free(VkDevice device, present_sync_objects *o) {
+  vkDestroyFence(device, o->in_flight, NULL);
+  vkDestroySemaphore(device, o->render_finished, NULL);
+  vkDestroySemaphore(device, o->image_available, NULL);
 }
