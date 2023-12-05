@@ -23,4 +23,5 @@ float noise(vec2 p){
 void main() {
   float gray = noise(position * vec2(0.43434343243, 0.5656343434) * 239) * 0.5 + 0.5;
   out_color = vec4(gray, gray, gray, 1.0);
+  out_color = vec4(color, 1.0);
 }

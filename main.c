@@ -7,12 +7,25 @@
 #include "watch_linux.h"
 #include "window.h"
 #include <GLFW/glfw3.h>
+#include <cglm/types.h>
 #include <logger.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <vk_mem_alloc.h>
 #include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vulkan_core.h>
+
+typedef struct {
+  vec2 pos;
+  vec3 color;
+} vertex;
+
+const vertex vertices[] = {
+    (vertex){.pos = {0.0, -0.5}, .color = {1.0, 0.0, 0.0}},
+    (vertex){.pos = {0.5, 0.5}, .color = {0.0, 1.0, 0.0}},
+    (vertex){.pos = {-0.5, 0.5}, .color = {0.0, 0.0, 1.0}}};
 
 static void key_callback(GLFWwindow *w, int key, int scancode, int action,
                          int mods) {
@@ -59,6 +72,11 @@ typedef struct {
   // command
   VkCommandPool command_pool;
   VkCommandBuffer command_buffers[MAX_FRAMES_IN_FLIGHT];
+
+  // memory-related
+  VmaAllocator vk_allocator;
+  VkBuffer vertex_buffer;
+  VmaAllocation vertex_buffer_allocation;
 } app;
 
 static void framebuffer_resize_callback(GLFWwindow *w, int width, int height) {
@@ -215,10 +233,30 @@ static bool create_graphics_pipeline(app *a) {
                    &(VkPipelineVertexInputStateCreateInfo){
                        .sType =
                            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                       .vertexBindingDescriptionCount = 0,
-                       .pVertexBindingDescriptions = NULL,
-                       .vertexAttributeDescriptionCount = 0,
-                       .pVertexAttributeDescriptions = NULL,
+                       .vertexBindingDescriptionCount = 1,
+                       .pVertexBindingDescriptions =
+                           (VkVertexInputBindingDescription[]){
+                               (VkVertexInputBindingDescription){
+                                   .stride = sizeof(vertex),
+                                   .binding = 0,
+                                   .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+                               },
+                           },
+                       .vertexAttributeDescriptionCount = 2,
+                       .pVertexAttributeDescriptions =
+                           (VkVertexInputAttributeDescription[]){
+                               (VkVertexInputAttributeDescription){
+                                   .binding = 0,
+                                   .offset = offsetof(vertex, pos),
+                                   .format = VK_FORMAT_R32G32_SFLOAT,
+                                   .location = 0,
+                               },
+                               (VkVertexInputAttributeDescription){
+                                   .binding = 0,
+                                   .offset = offsetof(vertex, color),
+                                   .format = VK_FORMAT_R32G32B32_SFLOAT,
+                                   .location = 1,
+                               }},
                    },
                .basePipelineHandle = VK_NULL_HANDLE,
                .basePipelineIndex = -1,
@@ -396,6 +434,50 @@ static bool app_init(app *a) {
     goto fail_shaderc;
   }
 
+  VkResult result;
+  if ((result = vmaCreateAllocator(
+           &(VmaAllocatorCreateInfo){
+               .device = a->device,
+               .instance = a->instance,
+               .physicalDevice = a->physical_device,
+           },
+           &a->vk_allocator)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create vulkan memory allocator: %s",
+              vk_error_to_string(result));
+    goto fail_vma;
+  }
+
+  if ((result =
+           vmaCreateBuffer(a->vk_allocator,
+                           &(VkBufferCreateInfo){
+                               .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                               .size = sizeof(vertices),
+                               .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                               .queueFamilyIndexCount = 1,
+                               .pQueueFamilyIndices = (u32[]){indices.graphics},
+                           },
+                           &(VmaAllocationCreateInfo){
+                               .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
+                           },
+                           &a->vertex_buffer, &a->vertex_buffer_allocation,
+                           NULL)) != VK_SUCCESS) {
+    LOG_ERROR("unable to allocate vertex buffer: %s",
+              vk_error_to_string(result));
+    goto fail_vertex_buffer;
+  }
+
+  void *data;
+  if ((result = vmaMapMemory(a->vk_allocator, a->vertex_buffer_allocation,
+                             &data)) != VK_SUCCESS) {
+    LOG_ERROR("unable to map vertex buffer memory: %s",
+              vk_error_to_string(result));
+    vmaUnmapMemory(a->vk_allocator, a->vertex_buffer_allocation);
+    goto fail_map_vertex_buffer;
+  }
+  memcpy(data, vertices, sizeof(vertices));
+  vmaUnmapMemory(a->vk_allocator, a->vertex_buffer_allocation);
+
   a->swapchain = VK_NULL_HANDLE;
   if (!init_swapchain_related(a)) {
     LOG_ERROR("unable to initialize swapchain-dependent vulkan objects");
@@ -428,6 +510,7 @@ static bool app_init(app *a) {
 
   if (!watch_init(&a->file_watch)) {
     LOG_WARN("unable to initialize shader file watch");
+    goto fail_file_watch;
   }
 
   watch_add(&a->file_watch, "shaders/");
@@ -435,6 +518,7 @@ static bool app_init(app *a) {
   return true;
 
   watch_free(&a->file_watch);
+fail_file_watch:
 fail_present_sync_objects:
   for (u32 i = 0; i < num_sync_objects; ++i) {
     present_sync_objects_free(a->device, &a->sync_objects[i]);
@@ -446,6 +530,12 @@ fail_command_pool:
 fail_queue_indices:
   free_swapchain_related(a);
 fail_vk_swapchain:
+fail_map_vertex_buffer:
+  vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
+                   a->vertex_buffer_allocation);
+fail_vertex_buffer:
+  vmaDestroyAllocator(a->vk_allocator);
+fail_vma:
   shader_compiler_free(&a->shaderc);
 fail_shaderc:
   device_free(a->device);
@@ -468,6 +558,9 @@ static void app_free(app *a) {
   }
   command_pool_free(a->device, a->command_pool);
   free_swapchain_related(a);
+  vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
+                   a->vertex_buffer_allocation);
+  vmaDestroyAllocator(a->vk_allocator);
   shader_compiler_free(&a->shaderc);
   device_free(a->device);
   surface_free(a->instance, a->surface);
@@ -498,7 +591,7 @@ static void app_loop(app *a) {
       watch_event_free(&a->file_watch, &e);
     }
 
-    if(reload) {
+    if (reload) {
       LOG_INFO("reloading shaders");
       a->recreate_swapchain = reload;
     }
@@ -573,6 +666,8 @@ static void app_loop(app *a) {
       {
         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           a->graphics_pipeline);
+        vkCmdBindVertexBuffers(command_buffer, 0, 1, &a->vertex_buffer,
+                               &(VkDeviceSize){0});
         vkCmdDraw(command_buffer, 3, 1, 0, 0);
       }
 
