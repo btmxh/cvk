@@ -140,6 +140,11 @@ bool transfer_context_stage_to_buffer(const transfer_context *c,
     goto fail_end_command_buffer;
   }
 
+  if ((result = vkResetFences(c->device, 1, &c->fence)) != VK_SUCCESS) {
+    LOG_ERROR("unable to reset transfer fence: %s", vk_error_to_string(result));
+    goto fail_reset_fence;
+  }
+
   if ((result = vkQueueSubmit(c->transfer_queue, 1,
                               &(VkSubmitInfo){
                                   .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -169,6 +174,7 @@ bool transfer_context_stage_to_buffer(const transfer_context *c,
 
 fail_wait:
 fail_queue_submit:
+fail_reset_fence:
 fail_end_command_buffer:
 fail_begin_command_buffer:
   vmaDestroyBuffer(c->vma, staging_buffer, allocation);

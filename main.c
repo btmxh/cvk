@@ -27,7 +27,12 @@ const vertex vertices[] = {
     (vertex){.pos = {-0.5, -0.5}, .color = {1.0, 0.0, 0.0}},
     (vertex){.pos = {0.5, -0.5}, .color = {0.0, 1.0, 0.0}},
     (vertex){.pos = {0.5, 0.5}, .color = {0.0, 0.0, 1.0}},
-    (vertex){.pos = {-0.5, 0.5}, .color = {1.0, 1.0, 1.0}}};
+    (vertex){.pos = {-0.5, 0.5}, .color = {1.0, 1.0, 1.0}},
+};
+
+const u32 vertex_indices[] = {
+    0, 1, 2, 2, 3, 0,
+};
 
 static void key_callback(GLFWwindow *w, int key, int scancode, int action,
                          int mods) {
@@ -82,6 +87,8 @@ typedef struct {
   transfer_context transfer;
   VkBuffer vertex_buffer;
   VmaAllocation vertex_buffer_allocation;
+  VkBuffer index_buffer;
+  VmaAllocation index_buffer_allocation;
 } app;
 
 static void framebuffer_resize_callback(GLFWwindow *w, int width, int height) {
@@ -273,7 +280,7 @@ static bool create_graphics_pipeline(app *a) {
                    &(VkPipelineInputAssemblyStateCreateInfo){
                        .sType =
                            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                       .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+                       .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                        .primitiveRestartEnable = VK_FALSE,
                    },
                .pRasterizationState =
@@ -482,6 +489,34 @@ static bool app_init(app *a) {
     goto fail_stage_vertex_buffer;
   }
 
+  if ((result =
+           vmaCreateBuffer(a->vk_allocator,
+                           &(VkBufferCreateInfo){
+                               .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                               .size = sizeof(vertex_indices),
+                               .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                               .queueFamilyIndexCount = 1,
+                               .pQueueFamilyIndices = (u32[]){indices.graphics},
+                           },
+                           &(VmaAllocationCreateInfo){
+                               .usage = VMA_MEMORY_USAGE_AUTO,
+                           },
+                           &a->index_buffer, &a->index_buffer_allocation,
+                           NULL)) != VK_SUCCESS) {
+    LOG_ERROR("unable to allocate index buffer: %s",
+              vk_error_to_string(result));
+    goto fail_index_buffer;
+  }
+
+  if (!transfer_context_stage_to_buffer(&a->transfer, a->index_buffer,
+                                        sizeof(vertex_indices), 0,
+                                        vertex_indices)) {
+    LOG_ERROR("unable to stage index data to index buffer");
+    goto fail_stage_index_buffer;
+  }
+
   a->swapchain = VK_NULL_HANDLE;
   if (!init_swapchain_related(a)) {
     LOG_ERROR("unable to initialize swapchain-dependent vulkan objects");
@@ -533,6 +568,10 @@ fail_command_pool:
 fail_queue_indices:
   free_swapchain_related(a);
 fail_vk_swapchain:
+fail_stage_index_buffer:
+  vmaDestroyBuffer(a->vk_allocator, a->index_buffer,
+                   a->index_buffer_allocation);
+fail_index_buffer:
 fail_stage_vertex_buffer:
   vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
                    a->vertex_buffer_allocation);
@@ -563,6 +602,8 @@ static void app_free(app *a) {
   }
   command_pool_free(a->device, a->command_pool);
   free_swapchain_related(a);
+  vmaDestroyBuffer(a->vk_allocator, a->index_buffer,
+                   a->index_buffer_allocation);
   vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
                    a->vertex_buffer_allocation);
   transfer_context_free(&a->transfer);
@@ -674,7 +715,11 @@ static void app_loop(app *a) {
                           a->graphics_pipeline);
         vkCmdBindVertexBuffers(command_buffer, 0, 1, &a->vertex_buffer,
                                &(VkDeviceSize){0});
-        vkCmdDraw(command_buffer, 3, 1, 0, 0);
+        vkCmdBindIndexBuffer(command_buffer, a->index_buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(command_buffer,
+                         sizeof(vertex_indices) / sizeof(vertex_indices[0]), 1,
+                         0, 0, 0);
       }
 
       vkCmdEndRenderPass(command_buffer);
