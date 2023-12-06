@@ -281,6 +281,7 @@ bool framebuffers_init(VkDevice device, u32 num_images,
              NULL, &(*framebuffers)[counter])) != VK_SUCCESS) {
       LOG_ERROR("unable to create %" PRIu32 "-th framebuffer: %s", counter + 1,
                 vk_error_to_string(result));
+      goto fail;
     }
 
     ++counter;

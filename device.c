@@ -7,13 +7,9 @@
 #include <stdlib.h>
 #include <vulkan/vulkan_core.h>
 
-static void queue_family_indices_init(queue_family_indices *indices) {
-  indices->graphics = QUEUE_INDEX_NONE;
-  indices->present = QUEUE_INDEX_NONE;
-}
-
-static bool queue_family_indices_complete(const queue_family_indices *indices) {
-  return indices->graphics >= 0 && indices->present >= 0;
+bool queue_family_indices_complete(const queue_family_indices *indices) {
+  return indices->graphics != VK_QUEUE_FAMILY_IGNORED &&
+         indices->present != VK_QUEUE_FAMILY_IGNORED;
 }
 
 static const char *required_device_extensions[] = {
@@ -72,7 +68,7 @@ static bool swap_chain_adaquate(const swap_chain_support_details *details) {
 }
 
 static i32 rate_physical_device(VkPhysicalDevice device, VkSurfaceKHR surface) {
-  static const i32 fail = 0, max = INT32_MAX;
+  static const i32 fail = 0;
   i32 score = 1;
 
   VkPhysicalDeviceProperties properties;
@@ -179,6 +175,10 @@ VkPhysicalDevice physical_device_pick(VkInstance instance,
 
 bool find_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface,
                          queue_family_indices *indices) {
+  indices->present = VK_QUEUE_FAMILY_IGNORED;
+  indices->graphics = VK_QUEUE_FAMILY_IGNORED;
+  indices->transfer = VK_QUEUE_FAMILY_IGNORED;
+
   u32 num_families;
   vkGetPhysicalDeviceQueueFamilyProperties(device, &num_families, NULL);
   VkQueueFamilyProperties *families =
@@ -192,6 +192,8 @@ bool find_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface,
   for (u32 i = 0; i < num_families; ++i) {
     if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
       indices->graphics = i;
+    } else if (families[i].queueFlags & VK_QUEUE_TRANSFER_BIT) {
+      indices->transfer = i;
     }
 
     VkBool32 present_supported;
@@ -206,8 +208,8 @@ bool find_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface,
   return true;
 }
 
-bool device_init(VkInstance instance, VkPhysicalDevice physical_device,
-                 VkSurfaceKHR surface, VkDevice *device) {
+bool device_init(VkPhysicalDevice physical_device, VkSurfaceKHR surface,
+                 VkDevice *device) {
   queue_family_indices indices;
   find_queue_families(physical_device, surface, &indices);
   assert(queue_family_indices_complete(&indices));
@@ -218,7 +220,7 @@ bool device_init(VkInstance instance, VkPhysicalDevice physical_device,
     num_layers = 0;
   }
 
-#define MAX_NUM_INDICES sizeof(queue_family_indices) / sizeof(queue_index)
+#define MAX_NUM_INDICES sizeof(queue_family_indices) / sizeof(u32)
   u32 unique_indices[MAX_NUM_INDICES], num_unique_indices = 0;
   unique_indices[num_unique_indices++] = indices.graphics;
   if (unique_indices[0] != indices.present) {

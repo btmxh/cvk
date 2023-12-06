@@ -151,8 +151,8 @@ const char **get_validation_layers(u32 *num_layers) {
     LOG_DEBUG("\t\t%s", supported_layers[i].description);
   }
 
-  for (u32 i = 0; i < num_requested_layers; ++i) {
-    for (u32 j = 0; j < num_supported_layers; ++j) {
+  for (i32 i = 0; i < num_requested_layers; ++i) {
+    for (i32 j = 0; j < (i32) num_supported_layers; ++j) {
       if (strcmp(supported_layers[j].layerName,
                  requested_validation_layers[i]) == 0) {
         layers[(*num_layers)++] = requested_validation_layers[i];

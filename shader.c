@@ -14,10 +14,8 @@
 #include <libgen.h>
 #include <string.h>
 
-static bool is_absolute_path(const char *path) { return *path == '/'; }
-
 static char *concat_path(const char *a, const char *b) {
-  usize len_a = strlen(a), len_b = strlen(b);
+  i32 len_a = strlen(a), len_b = strlen(b);
   assert(len_a > 0);
   bool needs_slash = a[len_a - 1] != '/';
 
@@ -53,8 +51,8 @@ static char *resolve_sibling(const char *a, const char *b) {
 #warning shaderc include support disabled. Please implement your own file path functions for non-unix platforms
 #endif
 
-static char *read_file(const char *path, usize *len) {
-  FILE *file = fopen(path, "r");
+static char *read_file(const char *path, i32 *len) {
+  FILE *file = fopen(path, "rb");
   if (!file) {
     goto fail_fopen;
   }
@@ -71,15 +69,13 @@ static char *read_file(const char *path, usize *len) {
     goto fail_malloc;
   }
 
-  if (fread(buf, *len, 1, file) < 0) {
-    LOG_ERROR("unable to read from file");
-    goto fail_fread;
-    return NULL;
-  }
+  fread(buf, *len, 1, file);
+  assert(!ferror(file));
+  assert(fgetc(file) == EOF && feof(file));
 
   fclose(file);
   return buf;
-fail_fread:
+
   free(buf);
 fail_malloc:
   fclose(file);
@@ -103,7 +99,9 @@ void shader_compiler_free(shader_compiler *compiler) {
 
 static shaderc_include_result *
 shader_resolver(void *user_data, const char *requested_source, int type,
-                const char *requesting_source, size_t include_depth) {
+                const char *requesting_source, usize include_depth) {
+  (void)user_data;
+  (void)include_depth;
   shaderc_include_result *result = malloc(sizeof(*result));
   if (!result) {
     return NULL;
@@ -112,7 +110,9 @@ shader_resolver(void *user_data, const char *requested_source, int type,
   if (type == shaderc_include_type_relative) {
     char *relative = resolve_sibling(requested_source, requesting_source);
     if (relative) {
-      result->content = read_file(relative, &result->content_length);
+      i32 length;
+      result->content = read_file(relative, &length);
+      result->content_length = length;
       if (result->content) {
         result->source_name = realpath(relative, NULL);
         result->source_name_length = strlen(result->source_name);
@@ -128,6 +128,7 @@ shader_resolver(void *user_data, const char *requested_source, int type,
 }
 
 static void shader_releaser(void *user_data, shaderc_include_result *result) {
+  (void)user_data;
   free((void *)result->content);
   free((void *)result->source_name);
 }
@@ -152,7 +153,7 @@ static const char *shader_status_to_string(shaderc_compilation_status status) {
 
 u32 *shader_compile_file(shader_compiler *compiler, const char *filename,
                          u32 *bytes_len) {
-  usize len;
+  i32 len;
   char *buf = read_file(filename, &len);
   if (!buf) {
     LOG_ERROR("unable to read file at path '%s'", filename);

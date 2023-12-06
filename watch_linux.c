@@ -49,8 +49,8 @@ void watch_remove(watch *w, int handle) { inotify_rm_watch(w->fd, handle); }
 bool watch_poll(watch *w, watch_event *event) {
   ssize_t r;
   struct inotify_event *e = (struct inotify_event *)w->buf;
-  while (w->buf_len < sizeof(struct inotify_event) ||
-         w->buf_len < sizeof(struct inotify_event) + e->len) {
+  while (w->buf_len < (i32)sizeof(struct inotify_event) ||
+         w->buf_len < (i32)(sizeof(struct inotify_event) + e->len)) {
     if ((r = read(w->fd, w->buf, w->buf_cap)) == -1) {
       return false;
     }
@@ -65,6 +65,7 @@ bool watch_poll(watch *w, watch_event *event) {
 }
 
 void watch_event_free(watch *w, watch_event *event) {
+  (void)event;
   i32 offset = sizeof(struct inotify_event) + w->event_len;
   memmove(w->buf, &w->buf[offset], w->buf_cap - offset);
   w->buf_len -= offset;

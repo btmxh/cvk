@@ -2,6 +2,7 @@
 #include "debug_msg.h"
 #include "device.h"
 #include "instance.h"
+#include "memory.h"
 #include "shader.h"
 #include "vk_utils.h"
 #include "watch_linux.h"
@@ -23,12 +24,15 @@ typedef struct {
 } vertex;
 
 const vertex vertices[] = {
-    (vertex){.pos = {0.0, -0.5}, .color = {1.0, 0.0, 0.0}},
-    (vertex){.pos = {0.5, 0.5}, .color = {0.0, 1.0, 0.0}},
-    (vertex){.pos = {-0.5, 0.5}, .color = {0.0, 0.0, 1.0}}};
+    (vertex){.pos = {-0.5, -0.5}, .color = {1.0, 0.0, 0.0}},
+    (vertex){.pos = {0.5, -0.5}, .color = {0.0, 1.0, 0.0}},
+    (vertex){.pos = {0.5, 0.5}, .color = {0.0, 0.0, 1.0}},
+    (vertex){.pos = {-0.5, 0.5}, .color = {1.0, 1.0, 1.0}}};
 
 static void key_callback(GLFWwindow *w, int key, int scancode, int action,
                          int mods) {
+  (void)scancode;
+  (void)mods;
   if (key == GLFW_KEY_Q && action == GLFW_PRESS) {
     glfwSetWindowShouldClose(w, true);
   }
@@ -75,11 +79,14 @@ typedef struct {
 
   // memory-related
   VmaAllocator vk_allocator;
+  transfer_context transfer;
   VkBuffer vertex_buffer;
   VmaAllocation vertex_buffer_allocation;
 } app;
 
 static void framebuffer_resize_callback(GLFWwindow *w, int width, int height) {
+  (void)width;
+  (void)height;
   app *a = glfwGetWindowUserPointer(w);
   a->recreate_swapchain = true;
 }
@@ -266,7 +273,7 @@ static bool create_graphics_pipeline(app *a) {
                    &(VkPipelineInputAssemblyStateCreateInfo){
                        .sType =
                            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                       .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                       .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
                        .primitiveRestartEnable = VK_FALSE,
                    },
                .pRasterizationState =
@@ -415,7 +422,7 @@ static bool app_init(app *a) {
     goto fail_vk_physical_device;
   }
 
-  if (!device_init(a->instance, a->physical_device, a->surface, &a->device)) {
+  if (!device_init(a->physical_device, a->surface, &a->device)) {
     LOG_ERROR("unable to create vulkan device");
     goto fail_vk_device;
   }
@@ -435,16 +442,17 @@ static bool app_init(app *a) {
   }
 
   VkResult result;
-  if ((result = vmaCreateAllocator(
-           &(VmaAllocatorCreateInfo){
-               .device = a->device,
-               .instance = a->instance,
-               .physicalDevice = a->physical_device,
-           },
-           &a->vk_allocator)) != VK_SUCCESS) {
+  if (!vma_create(a->instance, a->physical_device, a->device,
+                  &a->vk_allocator)) {
     LOG_ERROR("unable to create vulkan memory allocator: %s",
               vk_error_to_string(result));
     goto fail_vma;
+  }
+
+  if (!transfer_context_init(a->device, a->vk_allocator, &indices,
+                             &a->transfer)) {
+    LOG_ERROR("unable to create vulkan memory transfer context");
+    goto fail_transfer;
   }
 
   if ((result =
@@ -452,13 +460,14 @@ static bool app_init(app *a) {
                            &(VkBufferCreateInfo){
                                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                .size = sizeof(vertices),
-                               .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                               .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
                                .queueFamilyIndexCount = 1,
                                .pQueueFamilyIndices = (u32[]){indices.graphics},
                            },
                            &(VmaAllocationCreateInfo){
-                               .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
+                               .usage = VMA_MEMORY_USAGE_AUTO,
                            },
                            &a->vertex_buffer, &a->vertex_buffer_allocation,
                            NULL)) != VK_SUCCESS) {
@@ -467,16 +476,11 @@ static bool app_init(app *a) {
     goto fail_vertex_buffer;
   }
 
-  void *data;
-  if ((result = vmaMapMemory(a->vk_allocator, a->vertex_buffer_allocation,
-                             &data)) != VK_SUCCESS) {
-    LOG_ERROR("unable to map vertex buffer memory: %s",
-              vk_error_to_string(result));
-    vmaUnmapMemory(a->vk_allocator, a->vertex_buffer_allocation);
-    goto fail_map_vertex_buffer;
+  if (!transfer_context_stage_to_buffer(&a->transfer, a->vertex_buffer,
+                                        sizeof(vertices), 0, vertices)) {
+    LOG_ERROR("unable to stage vertex data to vertex buffer");
+    goto fail_stage_vertex_buffer;
   }
-  memcpy(data, vertices, sizeof(vertices));
-  vmaUnmapMemory(a->vk_allocator, a->vertex_buffer_allocation);
 
   a->swapchain = VK_NULL_HANDLE;
   if (!init_swapchain_related(a)) {
@@ -523,18 +527,19 @@ fail_present_sync_objects:
   for (u32 i = 0; i < num_sync_objects; ++i) {
     present_sync_objects_free(a->device, &a->sync_objects[i]);
   }
-fail_sync_objects:
 fail_command_buffer_allocate:
   command_pool_free(a->device, a->command_pool);
 fail_command_pool:
 fail_queue_indices:
   free_swapchain_related(a);
 fail_vk_swapchain:
-fail_map_vertex_buffer:
+fail_stage_vertex_buffer:
   vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
                    a->vertex_buffer_allocation);
 fail_vertex_buffer:
-  vmaDestroyAllocator(a->vk_allocator);
+  transfer_context_free(&a->transfer);
+fail_transfer:
+  vma_destroy(a->vk_allocator);
 fail_vma:
   shader_compiler_free(&a->shaderc);
 fail_shaderc:
@@ -560,6 +565,7 @@ static void app_free(app *a) {
   free_swapchain_related(a);
   vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
                    a->vertex_buffer_allocation);
+  transfer_context_free(&a->transfer);
   vmaDestroyAllocator(a->vk_allocator);
   shader_compiler_free(&a->shaderc);
   device_free(a->device);
@@ -579,8 +585,8 @@ static void app_loop(app *a) {
     bool reload = false;
     while (watch_poll(&a->file_watch, &e)) {
       if (!a->recreate_swapchain) {
-        for (i32 i = 0;
-             i < sizeof(watch_shader_files) / sizeof(watch_shader_files[0]);
+        for (i32 i = 0; i < (i32)(sizeof(watch_shader_files) /
+                                  sizeof(watch_shader_files[0]));
              ++i) {
           if (strcmp(e.name, watch_shader_files[i]) == 0) {
             reload = true;
