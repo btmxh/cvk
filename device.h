@@ -17,6 +17,10 @@ bool find_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface,
 
 bool queue_family_indices_complete(const queue_family_indices *indices);
 
+u32 *remove_duplicate_and_invalid_indices(u32 *indices, i32 num_indices,
+                                          i32 *num_unique_indices,
+                                          VkSharingMode *sharing_mode);
+
 bool device_init(VkPhysicalDevice physical_device, VkSurfaceKHR surface,
                  VkDevice *device);
 void device_free(VkDevice device);

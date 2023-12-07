@@ -111,6 +111,11 @@ static i32 rate_physical_device(VkPhysicalDevice device, VkSurfaceKHR surface) {
     FAIL("swap chain support not adaquate");
   }
 
+  if (!features.samplerAnisotropy) {
+    swap_chain_support_details_free(&swap_chain_support);
+    FAIL("anisotropy not supported");
+  }
+
   if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
     INCREASE("physical device is discrete GPU", 1000);
   }
@@ -208,6 +213,41 @@ bool find_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface,
   return true;
 }
 
+int compare_u32(const void *lhs, const void *rhs) {
+  return (i32) * (u32 *)lhs - (i32) * (u32 *)rhs;
+}
+
+u32 *remove_duplicate_and_invalid_indices(u32 *indices, i32 num_indices,
+                                          i32 *num_unique_indices,
+                                          VkSharingMode *sharing_mode) {
+  // very unoptimized to eliminate unnecessary complexity
+  // this is not used in hot paths, and neither does it need to work
+  // with large inputs
+  qsort(indices, num_indices, sizeof(*indices), compare_u32);
+  i32 j = 0;
+  for (i32 i = 0; i < num_indices; ++i) {
+    if (indices[i] == VK_QUEUE_FAMILY_IGNORED) {
+      continue;
+    }
+
+    if (j > 0 && indices[j - 1] == indices[i]) {
+      continue;
+    }
+
+    indices[j++] = indices[i];
+  }
+
+  if (sharing_mode) {
+    *sharing_mode = num_indices > 1 ? VK_SHARING_MODE_EXCLUSIVE
+                                    : VK_SHARING_MODE_CONCURRENT;
+  }
+  if (num_unique_indices) {
+    *num_unique_indices = j;
+  }
+
+  return indices;
+}
+
 bool device_init(VkPhysicalDevice physical_device, VkSurfaceKHR surface,
                  VkDevice *device) {
   queue_family_indices indices;
@@ -243,7 +283,10 @@ bool device_init(VkPhysicalDevice physical_device, VkSurfaceKHR surface,
            physical_device,
            &(VkDeviceCreateInfo){
                .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-               .pEnabledFeatures = &(VkPhysicalDeviceFeatures){},
+               .pEnabledFeatures =
+                   &(VkPhysicalDeviceFeatures){
+                       .samplerAnisotropy = VK_TRUE,
+                   },
                .ppEnabledLayerNames = layers,
                .enabledLayerCount = num_layers,
                .ppEnabledExtensionNames = required_device_extensions,

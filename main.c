@@ -1,6 +1,7 @@
 #include "command.h"
 #include "debug_msg.h"
 #include "device.h"
+#include "image.h"
 #include "instance.h"
 #include "memory.h"
 #include "shader.h"
@@ -8,8 +9,14 @@
 #include "watch_linux.h"
 #include "window.h"
 #include <GLFW/glfw3.h>
-#include <cglm/types.h>
+#include <assert.h>
+#include <cglm/affine.h>
+#include <cglm/cam.h>
+#include <cglm/mat4.h>
+#include <cglm/util.h>
 #include <logger.h>
+#include <stb/stb_image.h>
+#include <stdalign.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +40,12 @@ const vertex vertices[] = {
 const u32 vertex_indices[] = {
     0, 1, 2, 2, 3, 0,
 };
+
+typedef struct {
+  mat4 proj;
+  mat4 view;
+  mat4 model;
+} uniform_matrices;
 
 static void key_callback(GLFWwindow *w, int key, int scancode, int action,
                          int mods) {
@@ -67,6 +80,12 @@ typedef struct {
   u32 num_images;
   VkFramebuffer *framebuffers;
   present_sync_objects sync_objects[MAX_FRAMES_IN_FLIGHT];
+  VkBuffer uniform_buffers[MAX_FRAMES_IN_FLIGHT];
+  VmaAllocation uniform_buffer_allocation[MAX_FRAMES_IN_FLIGHT];
+  VmaAllocationInfo uniform_buffer_allocation_info[MAX_FRAMES_IN_FLIGHT];
+  VkDescriptorPool descriptor_pool;
+  VkDescriptorSet descriptor_sets[MAX_FRAMES_IN_FLIGHT];
+  VkDescriptorSetLayout descriptor_set_layout;
   u32 current_frame;
 
   // shader-related
@@ -79,7 +98,7 @@ typedef struct {
   VkPipeline graphics_pipeline;
 
   // command
-  VkCommandPool command_pool;
+  VkCommandPool command_pools[MAX_FRAMES_IN_FLIGHT];
   VkCommandBuffer command_buffers[MAX_FRAMES_IN_FLIGHT];
 
   // memory-related
@@ -89,6 +108,10 @@ typedef struct {
   VmaAllocation vertex_buffer_allocation;
   VkBuffer index_buffer;
   VmaAllocation index_buffer_allocation;
+  VkImage texture;
+  VmaAllocation texture_allocation;
+  VkImageView texture_view;
+  VkSampler texture_sampler;
 } app;
 
 static void framebuffer_resize_callback(GLFWwindow *w, int width, int height) {
@@ -115,8 +138,8 @@ static bool create_graphics_pipeline(app *a) {
            a->device,
            &(VkPipelineLayoutCreateInfo){
                .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-               .setLayoutCount = 0,
-               .pSetLayouts = NULL,
+               .setLayoutCount = 1,
+               .pSetLayouts = &a->descriptor_set_layout,
                .pushConstantRangeCount = 0,
                .pPushConstantRanges = NULL,
            },
@@ -163,7 +186,7 @@ static bool create_graphics_pipeline(app *a) {
                        .srcAccessMask = 0,
                        .dstStageMask =
                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                       .dstAccessMask = 0,
+                       .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                    },
            },
            NULL, &a->render_pass)) != VK_SUCCESS) {
@@ -288,7 +311,7 @@ static bool create_graphics_pipeline(app *a) {
                        .sType =
                            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
                        .cullMode = VK_CULL_MODE_BACK_BIT,
-                       .frontFace = VK_FRONT_FACE_CLOCKWISE,
+                       .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
                        .lineWidth = 1.0,
                        .polygonMode = VK_POLYGON_MODE_FILL,
                        .depthBiasEnable = VK_FALSE,
@@ -451,8 +474,7 @@ static bool app_init(app *a) {
   VkResult result;
   if (!vma_create(a->instance, a->physical_device, a->device,
                   &a->vk_allocator)) {
-    LOG_ERROR("unable to create vulkan memory allocator: %s",
-              vk_error_to_string(result));
+    LOG_ERROR("unable to create vulkan memory allocator");
     goto fail_vma;
   }
 
@@ -462,6 +484,13 @@ static bool app_init(app *a) {
     goto fail_transfer;
   }
 
+  i32 num_unique_indices;
+  VkSharingMode sharing_mode;
+  u32 *unique_queue_indices = remove_duplicate_and_invalid_indices(
+      (u32[]){indices.transfer, indices.graphics}, 2, &num_unique_indices,
+      &sharing_mode);
+  assert(num_unique_indices > 0);
+
   if ((result =
            vmaCreateBuffer(a->vk_allocator,
                            &(VkBufferCreateInfo){
@@ -469,9 +498,9 @@ static bool app_init(app *a) {
                                .size = sizeof(vertices),
                                .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                               .queueFamilyIndexCount = 1,
-                               .pQueueFamilyIndices = (u32[]){indices.graphics},
+                               .pQueueFamilyIndices = unique_queue_indices,
+                               .queueFamilyIndexCount = num_unique_indices,
+                               .sharingMode = sharing_mode,
                            },
                            &(VmaAllocationCreateInfo){
                                .usage = VMA_MEMORY_USAGE_AUTO,
@@ -496,9 +525,9 @@ static bool app_init(app *a) {
                                .size = sizeof(vertex_indices),
                                .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                               .queueFamilyIndexCount = 1,
-                               .pQueueFamilyIndices = (u32[]){indices.graphics},
+                               .sharingMode = sharing_mode,
+                               .queueFamilyIndexCount = num_unique_indices,
+                               .pQueueFamilyIndices = unique_queue_indices,
                            },
                            &(VmaAllocationCreateInfo){
                                .usage = VMA_MEMORY_USAGE_AUTO,
@@ -517,22 +546,162 @@ static bool app_init(app *a) {
     goto fail_stage_index_buffer;
   }
 
+  i32 num_uniform_buffers = 0;
+  while (num_uniform_buffers < MAX_FRAMES_IN_FLIGHT) {
+    if ((result = vmaCreateBuffer(
+             a->vk_allocator,
+             &(VkBufferCreateInfo){
+                 .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                 .size = sizeof(uniform_matrices),
+                 .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 .sharingMode = sharing_mode,
+                 .queueFamilyIndexCount = num_unique_indices,
+                 .pQueueFamilyIndices = unique_queue_indices,
+             },
+             &(VmaAllocationCreateInfo){
+                 .usage = VMA_MEMORY_USAGE_AUTO,
+                 .flags =
+                     VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                     VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+             },
+             &a->uniform_buffers[num_uniform_buffers],
+             &a->uniform_buffer_allocation[num_uniform_buffers],
+             &a->uniform_buffer_allocation_info[num_uniform_buffers])) !=
+        VK_SUCCESS) {
+      LOG_ERROR("unable to allocate %d-th uniform buffer: %s",
+                num_uniform_buffers + 1, vk_error_to_string(result));
+      goto fail_uniform_buffers;
+    }
+
+    ++num_uniform_buffers;
+  }
+
+  if ((result = vkCreateDescriptorPool(
+           a->device,
+           &(VkDescriptorPoolCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+               .poolSizeCount = 1,
+               .pPoolSizes =
+                   (VkDescriptorPoolSize[]){
+                       (VkDescriptorPoolSize){
+                           .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                           .descriptorCount = MAX_FRAMES_IN_FLIGHT,
+                       },
+                       (VkDescriptorPoolSize){
+                           .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                           .descriptorCount = MAX_FRAMES_IN_FLIGHT,
+                       }},
+               .maxSets = MAX_FRAMES_IN_FLIGHT,
+           },
+           NULL, &a->descriptor_pool)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create descriptor pool: %s",
+              vk_error_to_string(result));
+    goto fail_descriptor_pool;
+  }
+
+  if ((result = vkCreateDescriptorSetLayout(
+           a->device,
+           &(VkDescriptorSetLayoutCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+               .bindingCount = 1,
+               .pBindings =
+                   (VkDescriptorSetLayoutBinding[]){
+                       {
+                           .binding = 0,
+                           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                           .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+                           .descriptorCount = 1,
+                           .pImmutableSamplers = NULL,
+                       },
+                       (VkDescriptorSetLayoutBinding){
+                           .binding = 1,
+                           .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+                           .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                           .descriptorCount = 1,
+                           .pImmutableSamplers = &a->texture_sampler,
+                       }}},
+           NULL, &a->descriptor_set_layout)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create descriptor set layout: %s",
+              vk_error_to_string(result));
+    goto fail_descriptor_layout;
+  }
+
+  VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT];
+  for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    layouts[i] = a->descriptor_set_layout;
+  }
+  if ((result = vkAllocateDescriptorSets(
+           a->device,
+           &(VkDescriptorSetAllocateInfo){
+               .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+               .descriptorPool = a->descriptor_pool,
+               .descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
+               .pSetLayouts = layouts,
+           },
+           a->descriptor_sets)) != VK_SUCCESS) {
+    LOG_ERROR("unable to allocate descriptor sets from descriptor pool");
+    goto fail_descriptor_sets;
+  }
+
+  for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    vkUpdateDescriptorSets(
+        a->device, 1,
+        &(VkWriteDescriptorSet){
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .dstSet = a->descriptor_sets[i],
+            .dstBinding = 0,
+            .pImageInfo = NULL,
+            .pBufferInfo =
+                &(VkDescriptorBufferInfo){
+                    .offset = 0,
+                    .range = sizeof(uniform_matrices),
+                    .buffer = a->uniform_buffers[i],
+                },
+            .dstArrayElement = 0,
+            .pTexelBufferView = NULL,
+        },
+        0, NULL);
+  }
+
+  if (!image_load_from_file(&a->transfer, "resources/plst.png", &a->texture,
+                            &a->texture_allocation, &a->texture_view)) {
+    LOG_ERROR("unable to load texture");
+    goto fail_image_load;
+  }
+
+  if (!sampler_create(a->physical_device, a->device, &a->texture_sampler)) {
+    LOG_ERROR("unable to create texture sampler");
+    goto fail_sampler;
+  }
+
   a->swapchain = VK_NULL_HANDLE;
   if (!init_swapchain_related(a)) {
     LOG_ERROR("unable to initialize swapchain-dependent vulkan objects");
     goto fail_vk_swapchain;
   }
 
-  if (!command_pool_create(a->device, indices.graphics, &a->command_pool)) {
-    LOG_ERROR("unable to create command pool");
-    goto fail_command_pool;
-  }
+  i32 num_command_pools = 0;
+  while (num_command_pools < MAX_FRAMES_IN_FLIGHT) {
+    if (!command_pool_create(a->device, indices.graphics,
+                             &a->command_pools[num_command_pools])) {
+      LOG_ERROR("unable to create %" PRIi32 "-th command pool",
+                num_command_pools + 1);
+      goto fail_command_pools;
+    }
 
-  if (!command_buffer_allocate(a->device, a->command_pool,
-                               VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                               MAX_FRAMES_IN_FLIGHT, a->command_buffers)) {
-    LOG_ERROR("unable to allocate command buffers from command pool");
-    goto fail_command_buffer_allocate;
+    if (!command_buffer_allocate(a->device, a->command_pools[num_command_pools],
+                                 VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1,
+                                 &a->command_buffers[num_command_pools])) {
+      LOG_ERROR("unable to allocate %" PRIi32
+                "-th command buffer from command pool",
+                num_command_pools + 1);
+      goto fail_command_pools;
+    }
+
+    ++num_command_pools;
   }
 
   u32 num_sync_objects = 0;
@@ -562,12 +731,25 @@ fail_present_sync_objects:
   for (u32 i = 0; i < num_sync_objects; ++i) {
     present_sync_objects_free(a->device, &a->sync_objects[i]);
   }
-fail_command_buffer_allocate:
-  command_pool_free(a->device, a->command_pool);
-fail_command_pool:
-fail_queue_indices:
+fail_command_pools:
+  for (i32 i = 0; i < num_command_pools; ++i) {
+    command_pool_free(a->device, a->command_pools[i]);
+  }
   free_swapchain_related(a);
 fail_vk_swapchain:
+  sampler_free(a->device, a->texture_sampler);
+fail_sampler:
+  image_free(&a->transfer, a->texture, a->texture_allocation, a->texture_view);
+fail_image_load:
+fail_descriptor_sets:
+fail_descriptor_layout:
+  vkDestroyDescriptorPool(a->device, a->descriptor_pool, NULL);
+fail_descriptor_pool:
+fail_uniform_buffers:
+  for (i32 i = 0; i < num_uniform_buffers; ++i) {
+    vmaDestroyBuffer(a->vk_allocator, a->uniform_buffers[i],
+                     a->uniform_buffer_allocation[i]);
+  }
 fail_stage_index_buffer:
   vmaDestroyBuffer(a->vk_allocator, a->index_buffer,
                    a->index_buffer_allocation);
@@ -583,6 +765,7 @@ fail_vma:
   shader_compiler_free(&a->shaderc);
 fail_shaderc:
   device_free(a->device);
+fail_queue_indices:
 fail_vk_device:
 fail_vk_physical_device:
   surface_free(a->instance, a->surface);
@@ -600,8 +783,18 @@ static void app_free(app *a) {
   for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
     present_sync_objects_free(a->device, &a->sync_objects[i]);
   }
-  command_pool_free(a->device, a->command_pool);
+  for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    command_pool_free(a->device, a->command_pools[i]);
+  }
   free_swapchain_related(a);
+  sampler_free(a->device, a->texture_sampler);
+  image_free(&a->transfer, a->texture, a->texture_allocation, a->texture_view);
+  vkDestroyDescriptorSetLayout(a->device, a->descriptor_set_layout, NULL);
+  vkDestroyDescriptorPool(a->device, a->descriptor_pool, NULL);
+  for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    vmaDestroyBuffer(a->vk_allocator, a->uniform_buffers[i],
+                     a->uniform_buffer_allocation[i]);
+  }
   vmaDestroyBuffer(a->vk_allocator, a->index_buffer,
                    a->index_buffer_allocation);
   vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
@@ -670,6 +863,24 @@ static void app_loop(app *a) {
       }
     }
 
+    // update uniform buffers
+    {
+      uniform_matrices mat;
+      glm_mat4_identity(mat.proj);
+      glm_mat4_identity(mat.view);
+      glm_mat4_identity(mat.model);
+
+      double time = glfwGetTime();
+      glm_perspective(glm_rad(45.0), (float)a->extent.width / a->extent.height,
+                      0.1, 10.0, mat.proj);
+      mat.proj[1][1] *= -1;
+      glm_lookat((vec3){1, 1, 1}, (vec3){0, 0, 0}, (vec3){0, 0, 1}, mat.view);
+      glm_rotate_make(mat.model, time * GLM_PI_4, (vec3){0, 0, 1});
+
+      memcpy(a->uniform_buffer_allocation_info[frame_index].pMappedData, &mat,
+             sizeof(mat));
+    }
+
     if ((result = vkResetFences(a->device, 1,
                                 &a->sync_objects[frame_index].in_flight)) !=
         VK_SUCCESS) {
@@ -678,8 +889,14 @@ static void app_loop(app *a) {
                 frame_index, vk_error_to_string(result));
       return;
     }
+
+    if ((result = vkResetCommandPool(a->device, a->command_pools[frame_index],
+                                     0)) != VK_SUCCESS) {
+      LOG_ERROR("unable to reset %" PRIi32 "-th present command pool",
+                frame_index);
+      return;
+    }
     VkCommandBuffer command_buffer = a->command_buffers[frame_index];
-    vkResetCommandBuffer(command_buffer, 0);
     // record command buffer
     {
       if ((result = vkBeginCommandBuffer(
@@ -717,6 +934,9 @@ static void app_loop(app *a) {
                                &(VkDeviceSize){0});
         vkCmdBindIndexBuffer(command_buffer, a->index_buffer, 0,
                              VK_INDEX_TYPE_UINT32);
+        vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                a->graphics_pipeline_layout, 0, 1,
+                                &a->descriptor_sets[frame_index], 0, NULL);
         vkCmdDrawIndexed(command_buffer,
                          sizeof(vertex_indices) / sizeof(vertex_indices[0]), 1,
                          0, 0, 0);

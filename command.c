@@ -10,7 +10,7 @@ bool command_pool_create(VkDevice device, u32 graphics_queue_index,
            device,
            &(VkCommandPoolCreateInfo){
                .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-               .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+               .flags = 0,
                .queueFamilyIndex = graphics_queue_index,
            },
            NULL, pool)) != VK_SUCCESS) {

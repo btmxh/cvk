@@ -77,8 +77,6 @@ bool swapchain_init(window *w, VkPhysicalDevice physical_device,
     goto fail_indices;
   }
 
-  u32 indices_ptr[] = {indices.graphics, indices.present};
-
   u32 image_count = details.caps.minImageCount + 1;
   if (image_count < details.caps.maxImageCount &&
       details.caps.maxImageCount > 0) {
@@ -125,6 +123,11 @@ bool swapchain_init(window *w, VkPhysicalDevice physical_device,
         details.caps.maxImageExtent.height);
 
   VkResult result;
+  i32 num_unique_indices;
+  VkSharingMode sharing_mode;
+  u32 *unique_indices = remove_duplicate_and_invalid_indices(
+      (u32[]){indices.graphics, indices.present}, 2, &num_unique_indices,
+      &sharing_mode);
   if ((result = vkCreateSwapchainKHR(
            device,
            &(VkSwapchainCreateInfoKHR){
@@ -141,13 +144,9 @@ bool swapchain_init(window *w, VkPhysicalDevice physical_device,
                .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
                .imageColorSpace = format->colorSpace,
                .imageArrayLayers = 1,
-               .imageSharingMode = indices.present == indices.graphics
-                                       ? VK_SHARING_MODE_EXCLUSIVE
-                                       : VK_SHARING_MODE_CONCURRENT,
-               .queueFamilyIndexCount =
-                   indices.present == indices.graphics ? 0 : 2,
-               .pQueueFamilyIndices =
-                   indices.present == indices.graphics ? NULL : indices_ptr,
+               .imageSharingMode = sharing_mode,
+               .queueFamilyIndexCount = num_unique_indices,
+               .pQueueFamilyIndices = unique_indices,
            },
            NULL, swapchain)) != VK_SUCCESS) {
     LOG_ERROR("unable to create swapchain: %s", vk_error_to_string(result));
