@@ -28,13 +28,19 @@
 typedef struct {
   vec2 pos;
   vec3 color;
+  vec2 tex_coords;
 } vertex;
 
 const vertex vertices[] = {
-    (vertex){.pos = {-0.5, -0.5}, .color = {1.0, 0.0, 0.0}},
-    (vertex){.pos = {0.5, -0.5}, .color = {0.0, 1.0, 0.0}},
-    (vertex){.pos = {0.5, 0.5}, .color = {0.0, 0.0, 1.0}},
-    (vertex){.pos = {-0.5, 0.5}, .color = {1.0, 1.0, 1.0}},
+    (vertex){.pos = {-0.5, -0.5},
+             .color = {1.0, 0.0, 0.0},
+             .tex_coords = {0.0, 1.0}},
+    (vertex){
+        .pos = {0.5, -0.5}, .color = {0.0, 1.0, 0.0}, .tex_coords = {1.0, 1.0}},
+    (vertex){
+        .pos = {0.5, 0.5}, .color = {0.0, 0.0, 1.0}, .tex_coords = {1.0, 0.0}},
+    (vertex){
+        .pos = {-0.5, 0.5}, .color = {1.0, 1.0, 1.0}, .tex_coords = {0.0, 0.0}},
 };
 
 const u32 vertex_indices[] = {
@@ -279,7 +285,7 @@ static bool create_graphics_pipeline(app *a) {
                                    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
                                },
                            },
-                       .vertexAttributeDescriptionCount = 2,
+                       .vertexAttributeDescriptionCount = 3,
                        .pVertexAttributeDescriptions =
                            (VkVertexInputAttributeDescription[]){
                                (VkVertexInputAttributeDescription){
@@ -293,7 +299,14 @@ static bool create_graphics_pipeline(app *a) {
                                    .offset = offsetof(vertex, color),
                                    .format = VK_FORMAT_R32G32B32_SFLOAT,
                                    .location = 1,
-                               }},
+                               },
+                               (VkVertexInputAttributeDescription){
+                                   .binding = 0,
+                                   .offset = offsetof(vertex, tex_coords),
+                                   .format = VK_FORMAT_R32G32_SFLOAT,
+                                   .location = 2,
+                               },
+                           },
                    },
                .basePipelineHandle = VK_NULL_HANDLE,
                .basePipelineIndex = -1,
@@ -581,7 +594,7 @@ static bool app_init(app *a) {
            a->device,
            &(VkDescriptorPoolCreateInfo){
                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-               .poolSizeCount = 1,
+               .poolSizeCount = 2,
                .pPoolSizes =
                    (VkDescriptorPoolSize[]){
                        (VkDescriptorPoolSize){
@@ -604,7 +617,7 @@ static bool app_init(app *a) {
            a->device,
            &(VkDescriptorSetLayoutCreateInfo){
                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-               .bindingCount = 1,
+               .bindingCount = 2,
                .pBindings =
                    (VkDescriptorSetLayoutBinding[]){
                        {
@@ -616,10 +629,11 @@ static bool app_init(app *a) {
                        },
                        (VkDescriptorSetLayoutBinding){
                            .binding = 1,
-                           .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+                           .descriptorType =
+                               VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
                            .descriptorCount = 1,
-                           .pImmutableSamplers = &a->texture_sampler,
+                           .pImmutableSamplers = NULL,
                        }}},
            NULL, &a->descriptor_set_layout)) != VK_SUCCESS) {
     LOG_ERROR("unable to create descriptor set layout: %s",
@@ -644,28 +658,6 @@ static bool app_init(app *a) {
     goto fail_descriptor_sets;
   }
 
-  for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-    vkUpdateDescriptorSets(
-        a->device, 1,
-        &(VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .dstSet = a->descriptor_sets[i],
-            .dstBinding = 0,
-            .pImageInfo = NULL,
-            .pBufferInfo =
-                &(VkDescriptorBufferInfo){
-                    .offset = 0,
-                    .range = sizeof(uniform_matrices),
-                    .buffer = a->uniform_buffers[i],
-                },
-            .dstArrayElement = 0,
-            .pTexelBufferView = NULL,
-        },
-        0, NULL);
-  }
-
   if (!image_load_from_file(&a->transfer, "resources/plst.png", &a->texture,
                             &a->texture_allocation, &a->texture_view)) {
     LOG_ERROR("unable to load texture");
@@ -675,6 +667,43 @@ static bool app_init(app *a) {
   if (!sampler_create(a->physical_device, a->device, &a->texture_sampler)) {
     LOG_ERROR("unable to create texture sampler");
     goto fail_sampler;
+  }
+
+  for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    vkUpdateDescriptorSets(
+        a->device, 2,
+        (VkWriteDescriptorSet[]){
+            (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .dstSet = a->descriptor_sets[i],
+                .dstBinding = 0,
+                .pImageInfo = NULL,
+                .pBufferInfo =
+                    &(VkDescriptorBufferInfo){
+                        .offset = 0,
+                        .range = sizeof(uniform_matrices),
+                        .buffer = a->uniform_buffers[i],
+                    },
+                .dstArrayElement = 0,
+                .pTexelBufferView = NULL,
+            },
+            (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .dstSet = a->descriptor_sets[i],
+                .dstBinding = 1,
+                .pImageInfo =
+                    &(VkDescriptorImageInfo){
+                        .sampler = a->texture_sampler,
+                        .imageView = a->texture_view,
+                        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    },
+            },
+        },
+        0, NULL);
   }
 
   a->swapchain = VK_NULL_HANDLE;
@@ -742,6 +771,7 @@ fail_sampler:
   image_free(&a->transfer, a->texture, a->texture_allocation, a->texture_view);
 fail_image_load:
 fail_descriptor_sets:
+  vkDestroyDescriptorSetLayout(a->device, a->descriptor_set_layout, NULL);
 fail_descriptor_layout:
   vkDestroyDescriptorPool(a->device, a->descriptor_pool, NULL);
 fail_descriptor_pool:

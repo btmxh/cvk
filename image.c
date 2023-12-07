@@ -21,16 +21,16 @@ bool image_load_from_file(const transfer_context *tctx, const char *path,
   VkFormat format;
   switch (num_channels) {
   case STBI_grey:
-    format = VK_FORMAT_R8_UINT;
+    format = VK_FORMAT_R8_SRGB;
     break;
   case STBI_grey_alpha:
-    format = VK_FORMAT_R8G8_UINT;
+    format = VK_FORMAT_R8G8_SRGB;
     break;
   case STBI_rgb:
-    format = VK_FORMAT_R8G8B8_UINT;
+    format = VK_FORMAT_R8G8B8_SRGB;
     break;
   case STBI_rgb_alpha:
-    format = VK_FORMAT_R8G8B8A8_UINT;
+    format = VK_FORMAT_R8G8B8A8_SRGB;
     break;
   default:
     LOG_ERROR("invalid num_channels value: %d", num_channels);
