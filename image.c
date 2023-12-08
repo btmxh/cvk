@@ -3,7 +3,6 @@
 #include "device.h"
 #include "memory.h"
 #include "vk_utils.h"
-#include <alloca.h>
 #include <logger.h>
 #include <stb/stb_image.h>
 #include <vulkan/vulkan_core.h>
@@ -189,4 +188,118 @@ bool sampler_create(VkPhysicalDevice physical_device, VkDevice device,
 
 void sampler_free(VkDevice device, VkSampler sampler) {
   vkDestroySampler(device, sampler, NULL);
+}
+
+static VkFormat pick_depth_format(VkPhysicalDevice device, VkImageTiling tiling,
+                                  VkFormatFeatureFlags features) {
+  VkFormat formats[] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT,
+                        VK_FORMAT_D24_UNORM_S8_UINT};
+  for (i32 i = 0; i < (i32) (sizeof(formats) / sizeof(formats[0])); ++i) {
+    VkFormat format = formats[i];
+    VkFormatProperties properties;
+    vkGetPhysicalDeviceFormatProperties(device, format, &properties);
+
+    if (tiling == VK_IMAGE_TILING_LINEAR &&
+        features == (features & properties.linearTilingFeatures)) {
+      return format;
+    }
+    if (tiling == VK_IMAGE_TILING_OPTIMAL &&
+        features == (features & properties.optimalTilingFeatures)) {
+      return format;
+    }
+  }
+
+  return VK_FORMAT_MAX_ENUM;
+}
+
+bool image_init_depth_buffer(VkPhysicalDevice physical_device,
+                             const transfer_context *tctx, VkExtent2D size,
+                             VkImage *image, VmaAllocation *image_allocation,
+                             VkFormat* depth_format, VkImageView *view) {
+  VkResult result;
+  VkFormat format =
+      pick_depth_format(physical_device, VK_IMAGE_TILING_OPTIMAL,
+                        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+  i32 num_unique_indices;
+  VkSharingMode sharing_mode;
+  u32 *unique_queue_indices = remove_duplicate_and_invalid_indices(
+      (u32[]){tctx->indices.graphics, tctx->indices.transfer}, 2,
+      &num_unique_indices, &sharing_mode);
+  if (format == VK_FORMAT_MAX_ENUM) {
+    LOG_ERROR("unable to find depth format");
+    goto fail_format;
+  }
+
+  if ((result = vmaCreateImage(
+           tctx->vma,
+           &(VkImageCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+               .extent = {size.width, size.height, 1},
+               .format = format,
+               .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+               .tiling = VK_IMAGE_TILING_OPTIMAL,
+               .samples = VK_SAMPLE_COUNT_1_BIT,
+               .sharingMode = sharing_mode,
+               .mipLevels = 1,
+               .arrayLayers = 1,
+               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+               .pQueueFamilyIndices = unique_queue_indices,
+               .queueFamilyIndexCount = num_unique_indices,
+               .imageType = VK_IMAGE_TYPE_2D,
+           },
+           &(VmaAllocationCreateInfo){
+               .usage = VMA_MEMORY_USAGE_AUTO,
+           },
+           image, image_allocation, NULL)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create image: %s", vk_error_to_string(result));
+    goto fail_image;
+  }
+
+  if ((result = vkCreateImageView(
+           tctx->device,
+           &(VkImageViewCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+               .image = *image,
+               .format = format,
+               .viewType = VK_IMAGE_VIEW_TYPE_2D,
+               .components =
+                   {
+                       .r = VK_COMPONENT_SWIZZLE_R,
+                       .g = VK_COMPONENT_SWIZZLE_G,
+                       .b = VK_COMPONENT_SWIZZLE_B,
+                       .a = VK_COMPONENT_SWIZZLE_A,
+                   },
+               .subresourceRange =
+                   {
+                       .baseMipLevel = 0,
+                       .baseArrayLayer = 0,
+                       .layerCount = 1,
+                       .levelCount = 1,
+                       .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                   }},
+           NULL, view)) != VK_SUCCESS) {
+    LOG_ERROR("unable to create image view for depth buffer: %s",
+              vk_error_to_string(result));
+    goto fail_image_view;
+  }
+
+  if(depth_format) {
+    *depth_format = format;
+  }
+
+  return true;
+
+fail_image_view:
+  vmaDestroyImage(tctx->vma, *image, *image_allocation);
+fail_image:
+fail_format:
+  return false;
+}
+
+void image_free_depth_buffer(const transfer_context *tctx, VkImage image,
+                             VmaAllocation allocation, VkImageView view) {
+  if (view != VK_NULL_HANDLE) {
+    vkDestroyImageView(tctx->device, view, NULL);
+  }
+  vmaDestroyImage(tctx->vma, image, allocation);
 }

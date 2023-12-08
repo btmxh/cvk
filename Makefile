@@ -1,8 +1,10 @@
 CC=gcc
 CXX=g++
 OBJ = command.o debug_msg.o device.o image.o instance.o main.o memory.o shader.o stbi.o watch_linux.o window.o
-CFLAGS=-Wall -Wextra -Werror -fsanitize=address,leak,undefined -fno-omit-frame-pointer
 LIBS=-lglfw -lvulkan -llogger -lshaderc_shared -lm -lshaderc_shared -lvma 
+DEBUG_FLAGS=-fsanitize=address,leak,undefined -fno-omit-frame-pointer
+CFLAGS=-Wall -Wextra -Werror -Og -ggdb
+# CFLAGS=-Wall -Wextra -Werror -Og -ggdb $(DEBUG_FLAGS)
 
 %.o: %.c
 	$(CC) -c -o $@ $< $(CFLAGS)

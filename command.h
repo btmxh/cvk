@@ -3,7 +3,7 @@
 #include "types.h"
 #include <vulkan/vulkan_core.h>
 
-bool command_pool_create(VkDevice device, u32 graphics_queue_index,
+bool command_pool_create(VkDevice device, u32 queue_index,
                          VkCommandPool *pool);
 void command_pool_free(VkDevice device, VkCommandPool pool);
 

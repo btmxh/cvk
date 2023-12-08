@@ -3,7 +3,7 @@
 #include <logger.h>
 #include <vulkan/vulkan_core.h>
 
-bool command_pool_create(VkDevice device, u32 graphics_queue_index,
+bool command_pool_create(VkDevice device, u32 queue_index,
                          VkCommandPool *pool) {
   VkResult result;
   if ((result = vkCreateCommandPool(
@@ -11,7 +11,7 @@ bool command_pool_create(VkDevice device, u32 graphics_queue_index,
            &(VkCommandPoolCreateInfo){
                .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                .flags = 0,
-               .queueFamilyIndex = graphics_queue_index,
+               .queueFamilyIndex = queue_index,
            },
            NULL, pool)) != VK_SUCCESS) {
     LOG_ERROR("unable to create command pool");
@@ -49,4 +49,3 @@ void command_buffer_free(VkDevice device, VkCommandPool pool, u32 num_buffers,
                          VkCommandBuffer *buffers) {
   vkFreeCommandBuffers(device, pool, num_buffers, buffers);
 }
-

@@ -9,6 +9,7 @@
 // https://stackoverflow.com/questions/62374711/c-inline-function-generates-undefined-symbols-error
 #define inline static inline
 #include <vulkan/utility/vk_format_utils.h>
+#undef inline
 #include <vulkan/vulkan_core.h>
 
 bool vma_create(VkInstance instance, VkPhysicalDevice physical_device,
@@ -136,7 +137,7 @@ static bool transfer_context_create_staging_buffer(
   return true;
 }
 
-bool transfer_context_end_exec_command_buffer(const transfer_context *c) {
+static bool transfer_context_end_exec_command_buffer(const transfer_context *c) {
   VkResult result;
   if ((result = vkEndCommandBuffer(c->command_buffer)) != VK_SUCCESS) {
     LOG_ERROR("unable to end recording command buffer: %s",

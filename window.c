@@ -256,7 +256,8 @@ void swapchain_image_views_destroy(VkDevice device, VkImageView *views,
 
 bool framebuffers_init(VkDevice device, u32 num_images,
                        VkImageView *image_views, const VkExtent2D *extent,
-                       VkRenderPass render_pass, VkFramebuffer **framebuffers) {
+                       VkRenderPass render_pass, VkFramebuffer **framebuffers,
+                       VkImageView depth_image_view) {
   *framebuffers = malloc(num_images * sizeof(VkFramebuffer));
   if (!*framebuffers) {
     LOG_ERROR("unable to allocate framebuffer handle array");
@@ -270,8 +271,11 @@ bool framebuffers_init(VkDevice device, u32 num_images,
              device,
              &(VkFramebufferCreateInfo){
                  .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-                 .attachmentCount = 1,
-                 .pAttachments = &image_views[counter],
+                 .attachmentCount = depth_image_view != VK_NULL_HANDLE ? 2 : 1,
+                 .pAttachments = depth_image_view != VK_NULL_HANDLE
+                                     ? (VkImageView[]){image_views[counter],
+                                                       depth_image_view}
+                                     : &image_views[counter],
                  .width = extent->width,
                  .height = extent->height,
                  .renderPass = render_pass,

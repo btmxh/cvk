@@ -10,10 +10,6 @@
 #include "window.h"
 #include <GLFW/glfw3.h>
 #include <assert.h>
-#include <cglm/affine.h>
-#include <cglm/cam.h>
-#include <cglm/mat4.h>
-#include <cglm/util.h>
 #include <logger.h>
 #include <stb/stb_image.h>
 #include <stdalign.h>
@@ -25,26 +21,31 @@
 #include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vulkan_core.h>
 
+#define CGLM_FORCE_DEPTH_ZERO_TO_ONE
+#include <cglm/affine.h>
+#include <cglm/cam.h>
+#include <cglm/mat4.h>
+#include <cglm/util.h>
+
 typedef struct {
-  vec2 pos;
+  vec3 pos;
   vec3 color;
   vec2 tex_coords;
 } vertex;
 
 const vertex vertices[] = {
-    (vertex){.pos = {-0.5, -0.5},
-             .color = {1.0, 0.0, 0.0},
-             .tex_coords = {0.0, 1.0}},
-    (vertex){
-        .pos = {0.5, -0.5}, .color = {0.0, 1.0, 0.0}, .tex_coords = {1.0, 1.0}},
-    (vertex){
-        .pos = {0.5, 0.5}, .color = {0.0, 0.0, 1.0}, .tex_coords = {1.0, 0.0}},
-    (vertex){
-        .pos = {-0.5, 0.5}, .color = {1.0, 1.0, 1.0}, .tex_coords = {0.0, 0.0}},
+    (vertex){{-0.5, -0.5}, {1.0, 0.0, 0.0}, {0.0, 1.0}},
+    (vertex){{0.5, -0.5}, {0.0, 1.0, 0.0}, {1.0, 1.0}},
+    (vertex){{0.5, 0.5}, {0.0, 0.0, 1.0}, {1.0, 0.0}},
+    (vertex){{-0.5, 0.5}, {1.0, 1.0, 1.0}, {0.0, 0.0}},
+    (vertex){{-0.5, -0.5, -0.5}, {1.0, 0.0, 0.0}, {0.0, 1.0}},
+    (vertex){{0.5, -0.5, -0.5}, {0.0, 1.0, 0.0}, {1.0, 1.0}},
+    (vertex){{0.5, 0.5, -0.5}, {0.0, 0.0, 1.0}, {1.0, 0.0}},
+    (vertex){{-0.5, 0.5, -0.5}, {1.0, 1.0, 1.0}, {0.0, 0.0}},
 };
 
 const u32 vertex_indices[] = {
-    0, 1, 2, 2, 3, 0,
+    0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4,
 };
 
 typedef struct {
@@ -93,6 +94,12 @@ typedef struct {
   VkDescriptorSet descriptor_sets[MAX_FRAMES_IN_FLIGHT];
   VkDescriptorSetLayout descriptor_set_layout;
   u32 current_frame;
+
+  // depth buffering
+  VkFormat depth_format;
+  VkImage depth_image;
+  VkImageView depth_image_view;
+  VmaAllocation depth_image_allocation;
 
   // shader-related
   shader_compiler shaderc;
@@ -159,17 +166,30 @@ static bool create_graphics_pipeline(app *a) {
            a->device,
            &(VkRenderPassCreateInfo){
                .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-               .attachmentCount = 1,
+               .attachmentCount = 2,
                .pAttachments =
-                   &(VkAttachmentDescription){
-                       .format = a->format.format,
-                       .samples = VK_SAMPLE_COUNT_1_BIT,
-                       .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                       .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                   (VkAttachmentDescription[]){
+                       (VkAttachmentDescription){
+                           .format = a->format.format,
+                           .samples = VK_SAMPLE_COUNT_1_BIT,
+                           .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                           .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                           .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                           .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                           .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                       },
+                       (VkAttachmentDescription){
+                           .format = a->depth_format,
+                           .samples = VK_SAMPLE_COUNT_1_BIT,
+                           .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                           .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                           .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                           .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                           .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                           .finalLayout =
+                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                       },
                    },
                .subpassCount = 1,
                .pSubpasses =
@@ -181,6 +201,12 @@ static bool create_graphics_pipeline(app *a) {
                                .layout =
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                .attachment = 0,
+                           },
+                       .pDepthStencilAttachment =
+                           &(VkAttachmentReference){
+                               .layout =
+                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                               .attachment = 1,
                            }},
                .dependencyCount = 1,
                .pDependencies =
@@ -188,11 +214,16 @@ static bool create_graphics_pipeline(app *a) {
                        .srcSubpass = VK_SUBPASS_EXTERNAL,
                        .dstSubpass = 0,
                        .srcStageMask =
-                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                       .srcAccessMask = 0,
+                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                       .srcAccessMask =
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                        .dstStageMask =
-                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                       .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                       .dstAccessMask =
+                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                    },
            },
            NULL, &a->render_pass)) != VK_SUCCESS) {
@@ -291,7 +322,7 @@ static bool create_graphics_pipeline(app *a) {
                                (VkVertexInputAttributeDescription){
                                    .binding = 0,
                                    .offset = offsetof(vertex, pos),
-                                   .format = VK_FORMAT_R32G32_SFLOAT,
+                                   .format = VK_FORMAT_R32G32B32_SFLOAT,
                                    .location = 0,
                                },
                                (VkVertexInputAttributeDescription){
@@ -310,7 +341,18 @@ static bool create_graphics_pipeline(app *a) {
                    },
                .basePipelineHandle = VK_NULL_HANDLE,
                .basePipelineIndex = -1,
-               .pDepthStencilState = NULL,
+               .pDepthStencilState =
+                   &(VkPipelineDepthStencilStateCreateInfo){
+                       .sType =
+                           VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                       .depthTestEnable = VK_TRUE,
+                       .depthWriteEnable = VK_TRUE,
+                       .depthCompareOp = VK_COMPARE_OP_LESS,
+                       .depthBoundsTestEnable = VK_FALSE,
+                       .minDepthBounds = 0.0,
+                       .maxDepthBounds = 1.0,
+                       .stencilTestEnable = VK_FALSE,
+                   },
                .pTessellationState = NULL,
                .pInputAssemblyState =
                    &(VkPipelineInputAssemblyStateCreateInfo){
@@ -385,13 +427,21 @@ static bool init_swapchain_related(app *a) {
     goto fail_vk_swapchain_image_views;
   }
 
+  if (!image_init_depth_buffer(a->physical_device, &a->transfer, a->extent,
+                               &a->depth_image, &a->depth_image_allocation,
+                               &a->depth_format, &a->depth_image_view)) {
+    LOG_ERROR("unable to initialize depth buffer");
+    goto fail_depth_buffer;
+  }
+
   if (!create_graphics_pipeline(a)) {
     LOG_ERROR("unable to initialize graphics pipeline for app");
     goto fail_graphics_pipeline;
   }
 
   if (!framebuffers_init(a->device, a->num_images, a->image_views, &a->extent,
-                         a->render_pass, &a->framebuffers)) {
+                         a->render_pass, &a->framebuffers,
+                         a->depth_image_view)) {
     LOG_ERROR("unable to initialize present framebuffers");
     goto fail_framebuffers;
   }
@@ -402,6 +452,9 @@ static bool init_swapchain_related(app *a) {
 fail_framebuffers:
   free_graphics_pipeline(a);
 fail_graphics_pipeline:
+  image_free_depth_buffer(&a->transfer, a->depth_image,
+                          a->depth_image_allocation, a->depth_image_view);
+fail_depth_buffer:
   swapchain_image_views_destroy(a->device, a->image_views, a->num_images);
 fail_vk_swapchain_image_views:
   free(a->images);
@@ -414,6 +467,8 @@ fail_vk_swapchain:
 static void free_swapchain_related(app *a) {
   framebuffers_free(a->device, a->num_images, a->framebuffers);
   free_graphics_pipeline(a);
+  image_free_depth_buffer(&a->transfer, a->depth_image,
+                          a->depth_image_allocation, a->depth_image_view);
   swapchain_image_views_destroy(a->device, a->image_views, a->num_images);
   free(a->images);
   swapchain_free(a->device, a->swapchain);
@@ -949,13 +1004,24 @@ static void app_loop(app *a) {
                       .extent = a->extent,
                   },
               .framebuffer = a->framebuffers[image_index],
-              .clearValueCount = 1,
-              .pClearValues = (VkClearValue[]){(VkClearValue){
-                  .color =
-                      {
-                          .float32 = {0, 0, 0, 1},
+              .clearValueCount = 2,
+              .pClearValues =
+                  (VkClearValue[]){
+                      (VkClearValue){
+                          .color =
+                              {
+                                  .float32 = {0, 0, 0, 1},
+                              },
                       },
-              }}},
+                      (VkClearValue){
+                          .depthStencil =
+                              {
+                                  .depth = 1.0,
+                                  .stencil = 0,
+                              },
+                      },
+                  },
+          },
           VK_SUBPASS_CONTENTS_INLINE);
       {
         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
