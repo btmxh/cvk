@@ -137,7 +137,8 @@ static bool transfer_context_create_staging_buffer(
   return true;
 }
 
-static bool transfer_context_end_exec_command_buffer(const transfer_context *c) {
+static bool
+transfer_context_end_exec_command_buffer(const transfer_context *c) {
   VkResult result;
   if ((result = vkEndCommandBuffer(c->command_buffer)) != VK_SUCCESS) {
     LOG_ERROR("unable to end recording command buffer: %s",
@@ -213,55 +214,8 @@ fail_staging_buffer:
   return false;
 }
 
-static bool transfer_context_transition_image_layout(const transfer_context *c,
-                                                     VkImage image,
-                                                     VkFormat format,
-                                                     VkImageLayout from,
-                                                     VkImageLayout to) {
-  (void)format;
-  VkAccessFlags src_access_mask = 0, dst_access_mask = 0;
-  VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-  if (from == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-    src_access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-  }
-
-  if (to == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-    dst_access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-  }
-
-  if (to == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-    dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
-    dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-  }
-
-  vkCmdPipelineBarrier(c->command_buffer, src_stage, dst_stage, 0, 0, NULL, 0,
-                       NULL, 1,
-                       &(VkImageMemoryBarrier){
-                           .image = image,
-                           .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                           .oldLayout = from,
-                           .newLayout = to,
-                           .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                           .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                           .subresourceRange =
-                               {
-                                   .baseMipLevel = 0,
-                                   .levelCount = 1,
-                                   .baseArrayLayer = 0,
-                                   .layerCount = 1,
-                                   .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                               },
-                           .srcAccessMask = src_access_mask,
-                           .dstAccessMask = dst_access_mask,
-                       });
-  return true;
-}
-
 bool transfer_context_stage_linear_data_to_2d_image(
-    const transfer_context *c, VkImage image, VkRect2D region,
+    const transfer_context *c, VkImage image, i32 num_levels, VkRect2D region,
     const void *image_pixels, VkFormat format,
     VkImageLayout transition_layout) {
   i32 buffer_size =
@@ -284,9 +238,26 @@ bool transfer_context_stage_linear_data_to_2d_image(
     goto fail_begin_command_buffer;
   }
 
-  transfer_context_transition_image_layout(
-      c, image, format, VK_IMAGE_LAYOUT_UNDEFINED,
-      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  vkCmdPipelineBarrier(c->command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+                       &(VkImageMemoryBarrier){
+                           .image = image,
+                           .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                           .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                           .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                           .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                           .subresourceRange =
+                               {
+                                   .baseMipLevel = 0,
+                                   .levelCount = num_levels,
+                                   .baseArrayLayer = 0,
+                                   .layerCount = 1,
+                                   .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               },
+                           .srcAccessMask = VK_ACCESS_NONE,
+                           .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                       });
 
   vkCmdCopyBufferToImage(c->command_buffer, staging_buffer, image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
@@ -317,9 +288,26 @@ bool transfer_context_stage_linear_data_to_2d_image(
 
   if (transition_layout != VK_IMAGE_LAYOUT_UNDEFINED &&
       transition_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-    transfer_context_transition_image_layout(
-        c, image, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        transition_layout);
+    vkCmdPipelineBarrier(c->command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1,
+                         &(VkImageMemoryBarrier){
+                             .image = image,
+                             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                             .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             .newLayout = transition_layout,
+                             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                             .subresourceRange =
+                                 {
+                                     .baseMipLevel = 0,
+                                     .levelCount = num_levels,
+                                     .baseArrayLayer = 0,
+                                     .layerCount = 1,
+                                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                 },
+                             .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                             .dstAccessMask = VK_ACCESS_NONE,
+                         });
   }
 
   if (!transfer_context_end_exec_command_buffer(c)) {

@@ -67,6 +67,33 @@ static bool swap_chain_adaquate(const swap_chain_support_details *details) {
   return details->num_formats > 0 && details->num_present_modes > 0;
 }
 
+VkSampleCountFlagBits best_msaa_sample_count(VkPhysicalDevice physical_device) {
+  VkPhysicalDeviceProperties properties;
+  vkGetPhysicalDeviceProperties(physical_device, &properties);
+
+  i32 flags = properties.limits.framebufferColorSampleCounts &
+              properties.limits.framebufferDepthSampleCounts;
+  if (flags & VK_SAMPLE_COUNT_64_BIT) {
+    return VK_SAMPLE_COUNT_64_BIT;
+  }
+  if (flags & VK_SAMPLE_COUNT_32_BIT) {
+    return VK_SAMPLE_COUNT_32_BIT;
+  }
+  if (flags & VK_SAMPLE_COUNT_16_BIT) {
+    return VK_SAMPLE_COUNT_16_BIT;
+  }
+  if (flags & VK_SAMPLE_COUNT_8_BIT) {
+    return VK_SAMPLE_COUNT_8_BIT;
+  }
+  if (flags & VK_SAMPLE_COUNT_4_BIT) {
+    return VK_SAMPLE_COUNT_4_BIT;
+  }
+  if (flags & VK_SAMPLE_COUNT_2_BIT) {
+    return VK_SAMPLE_COUNT_2_BIT;
+  }
+  return VK_SAMPLE_COUNT_1_BIT;
+}
+
 static i32 rate_physical_device(VkPhysicalDevice device, VkSurfaceKHR surface) {
   static const i32 fail = 0;
   i32 score = 1;
@@ -122,6 +149,9 @@ static i32 rate_physical_device(VkPhysicalDevice device, VkSurfaceKHR surface) {
 
   INCREASE("increase score by maximum supported image size",
            properties.limits.maxImageDimension2D);
+
+  INCREASE("increase score by maximum MSAA support",
+           best_msaa_sample_count(device) * 10);
 
   swap_chain_support_details_free(&swap_chain_support);
   return score;

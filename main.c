@@ -27,26 +27,61 @@
 #include <cglm/mat4.h>
 #include <cglm/util.h>
 
+#include <assimp/cimport.h>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+
 typedef struct {
-  vec3 pos;
-  vec3 color;
-  vec2 tex_coords;
-} vertex;
+  i32 offset_positions;
+  i32 size_positions;
+  i32 offset_texcoords;
+  i32 size_texcoords;
+  i32 vertex_buffer_size;
+  i32 index_buffer_size;
+  i32 num_indices;
+} model_layout;
 
-const vertex vertices[] = {
-    (vertex){{-0.5, -0.5}, {1.0, 0.0, 0.0}, {0.0, 1.0}},
-    (vertex){{0.5, -0.5}, {0.0, 1.0, 0.0}, {1.0, 1.0}},
-    (vertex){{0.5, 0.5}, {0.0, 0.0, 1.0}, {1.0, 0.0}},
-    (vertex){{-0.5, 0.5}, {1.0, 1.0, 1.0}, {0.0, 0.0}},
-    (vertex){{-0.5, -0.5, -0.5}, {1.0, 0.0, 0.0}, {0.0, 1.0}},
-    (vertex){{0.5, -0.5, -0.5}, {0.0, 1.0, 0.0}, {1.0, 1.0}},
-    (vertex){{0.5, 0.5, -0.5}, {0.0, 0.0, 1.0}, {1.0, 0.0}},
-    (vertex){{-0.5, 0.5, -0.5}, {1.0, 1.0, 1.0}, {0.0, 0.0}},
-};
+static model_layout mesh_layout(const struct aiMesh *mesh) {
+  model_layout l;
+  l.offset_positions = 0;
+  l.size_positions = mesh->mNumVertices * 3 * sizeof(float);
+  l.offset_texcoords = l.offset_positions + l.size_positions;
+  l.size_texcoords = mesh->mNumVertices * 2 * sizeof(float);
+  l.vertex_buffer_size = l.offset_texcoords + l.size_texcoords;
+  l.num_indices = mesh->mNumFaces * 3;
+  l.index_buffer_size = l.num_indices * sizeof(u32);
+  return l;
+}
 
-const u32 vertex_indices[] = {
-    0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4,
-};
+static float *texcoords_buffer(const struct aiMesh *mesh) {
+  i32 num_vs = mesh->mNumVertices;
+  assert(mesh->mNumUVComponents[0] == 2);
+  float *buffer = malloc(num_vs * 2 * sizeof(float));
+  if (!buffer) {
+    LOG_ERROR("unable to allocate texcoords buffer");
+    return NULL;
+  }
+  for (i32 i = 0; i < num_vs; ++i) {
+    memcpy(&buffer[i * 2], &mesh->mTextureCoords[0][i], 2 * sizeof(float));
+  }
+  return buffer;
+}
+
+static u32 *indices_buffer(const struct aiMesh *mesh) {
+  i32 num_faces = mesh->mNumFaces;
+  u32 *buffer = malloc(num_faces * 3 * sizeof(u32));
+  if (!buffer) {
+    LOG_ERROR("unable to allocate indices buffer");
+    return NULL;
+  }
+  for (i32 i = 0; i < num_faces; ++i) {
+    assert(mesh->mFaces[i].mNumIndices == 3);
+    buffer[i * 3] = mesh->mFaces[i].mIndices[0];
+    buffer[i * 3 + 1] = mesh->mFaces[i].mIndices[1];
+    buffer[i * 3 + 2] = mesh->mFaces[i].mIndices[2];
+  }
+  return buffer;
+}
 
 typedef struct {
   mat4 proj;
@@ -80,6 +115,7 @@ typedef struct {
 
   // swapchain derived
   VkSwapchainKHR swapchain;
+  VkSampleCountFlagBits msaa_samples;
   VkSurfaceFormatKHR format;
   VkExtent2D extent;
   VkImage *images;
@@ -94,6 +130,11 @@ typedef struct {
   VkDescriptorSet descriptor_sets[MAX_FRAMES_IN_FLIGHT];
   VkDescriptorSetLayout descriptor_set_layout;
   u32 current_frame;
+
+  // msaa offscreen color buffer
+  VkImage color_image;
+  VmaAllocation color_image_allocation;
+  VkImageView color_image_view;
 
   // depth buffering
   VkFormat depth_format;
@@ -117,6 +158,7 @@ typedef struct {
   // memory-related
   VmaAllocator vk_allocator;
   transfer_context transfer;
+  model_layout ml;
   VkBuffer vertex_buffer;
   VmaAllocation vertex_buffer_allocation;
   VkBuffer index_buffer;
@@ -166,22 +208,23 @@ static bool create_graphics_pipeline(app *a) {
            a->device,
            &(VkRenderPassCreateInfo){
                .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-               .attachmentCount = 2,
+               .attachmentCount = 3,
                .pAttachments =
                    (VkAttachmentDescription[]){
                        (VkAttachmentDescription){
                            .format = a->format.format,
-                           .samples = VK_SAMPLE_COUNT_1_BIT,
+                           .samples = a->msaa_samples,
                            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                           .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                           .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                           .finalLayout =
+                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                        },
                        (VkAttachmentDescription){
                            .format = a->depth_format,
-                           .samples = VK_SAMPLE_COUNT_1_BIT,
+                           .samples = a->msaa_samples,
                            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
                            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -190,7 +233,16 @@ static bool create_graphics_pipeline(app *a) {
                            .finalLayout =
                                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                        },
-                   },
+                       (VkAttachmentDescription){
+                           .format = a->format.format,
+                           .samples = VK_SAMPLE_COUNT_1_BIT,
+                           .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                           .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                           .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                           .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                           .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                       }},
                .subpassCount = 1,
                .pSubpasses =
                    &(VkSubpassDescription){
@@ -207,7 +259,14 @@ static bool create_graphics_pipeline(app *a) {
                                .layout =
                                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                .attachment = 1,
-                           }},
+                           },
+                       .pResolveAttachments =
+                           &(VkAttachmentReference){
+                               .layout =
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                               .attachment = 2,
+                           },
+                   },
                .dependencyCount = 1,
                .pDependencies =
                    &(VkSubpassDependency){
@@ -217,6 +276,7 @@ static bool create_graphics_pipeline(app *a) {
                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                        .srcAccessMask =
+                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                        .dstStageMask =
                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
@@ -301,41 +361,40 @@ static bool create_graphics_pipeline(app *a) {
                        .alphaToOneEnable = VK_FALSE,
                        .alphaToCoverageEnable = VK_FALSE,
                        .sampleShadingEnable = VK_FALSE,
-                       .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+                       .rasterizationSamples = a->msaa_samples,
                    },
                .pVertexInputState =
                    &(VkPipelineVertexInputStateCreateInfo){
                        .sType =
                            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                       .vertexBindingDescriptionCount = 1,
+                       .vertexBindingDescriptionCount = 2,
                        .pVertexBindingDescriptions =
                            (VkVertexInputBindingDescription[]){
                                (VkVertexInputBindingDescription){
-                                   .stride = sizeof(vertex),
                                    .binding = 0,
+                                   .stride = 3 * sizeof(float),
+                                   .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+                               },
+                               (VkVertexInputBindingDescription){
+                                   .binding = 1,
+                                   .stride = 2 * sizeof(float),
                                    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
                                },
                            },
-                       .vertexAttributeDescriptionCount = 3,
+                       .vertexAttributeDescriptionCount = 2,
                        .pVertexAttributeDescriptions =
                            (VkVertexInputAttributeDescription[]){
                                (VkVertexInputAttributeDescription){
-                                   .binding = 0,
-                                   .offset = offsetof(vertex, pos),
-                                   .format = VK_FORMAT_R32G32B32_SFLOAT,
                                    .location = 0,
-                               },
-                               (VkVertexInputAttributeDescription){
                                    .binding = 0,
-                                   .offset = offsetof(vertex, color),
+                                   .offset = 0,
                                    .format = VK_FORMAT_R32G32B32_SFLOAT,
-                                   .location = 1,
                                },
                                (VkVertexInputAttributeDescription){
-                                   .binding = 0,
-                                   .offset = offsetof(vertex, tex_coords),
+                                   .location = 1,
+                                   .binding = 1,
+                                   .offset = 0,
                                    .format = VK_FORMAT_R32G32_SFLOAT,
-                                   .location = 2,
                                },
                            },
                    },
@@ -427,9 +486,17 @@ static bool init_swapchain_related(app *a) {
     goto fail_vk_swapchain_image_views;
   }
 
+  if (!image_init_msaa_buffer(
+          &a->transfer, a->extent, a->msaa_samples, a->format.format,
+          &a->color_image, &a->color_image_allocation, &a->color_image_view)) {
+    LOG_ERROR("unable to initialize msaa color buffer");
+    goto fail_msaa_color_buffer;
+  }
+
   if (!image_init_depth_buffer(a->physical_device, &a->transfer, a->extent,
-                               &a->depth_image, &a->depth_image_allocation,
-                               &a->depth_format, &a->depth_image_view)) {
+                               a->msaa_samples, &a->depth_image,
+                               &a->depth_image_allocation, &a->depth_format,
+                               &a->depth_image_view)) {
     LOG_ERROR("unable to initialize depth buffer");
     goto fail_depth_buffer;
   }
@@ -440,7 +507,7 @@ static bool init_swapchain_related(app *a) {
   }
 
   if (!framebuffers_init(a->device, a->num_images, a->image_views, &a->extent,
-                         a->render_pass, &a->framebuffers,
+                         a->render_pass, &a->framebuffers, a->color_image_view,
                          a->depth_image_view)) {
     LOG_ERROR("unable to initialize present framebuffers");
     goto fail_framebuffers;
@@ -452,9 +519,12 @@ static bool init_swapchain_related(app *a) {
 fail_framebuffers:
   free_graphics_pipeline(a);
 fail_graphics_pipeline:
-  image_free_depth_buffer(&a->transfer, a->depth_image,
-                          a->depth_image_allocation, a->depth_image_view);
+  image_free(&a->transfer, a->depth_image, a->depth_image_allocation,
+             a->depth_image_view, VK_NULL_HANDLE);
 fail_depth_buffer:
+  image_free(&a->transfer, a->color_image, a->color_image_allocation,
+             a->color_image_view, VK_NULL_HANDLE);
+fail_msaa_color_buffer:
   swapchain_image_views_destroy(a->device, a->image_views, a->num_images);
 fail_vk_swapchain_image_views:
   free(a->images);
@@ -467,8 +537,10 @@ fail_vk_swapchain:
 static void free_swapchain_related(app *a) {
   framebuffers_free(a->device, a->num_images, a->framebuffers);
   free_graphics_pipeline(a);
-  image_free_depth_buffer(&a->transfer, a->depth_image,
-                          a->depth_image_allocation, a->depth_image_view);
+  image_free(&a->transfer, a->depth_image, a->depth_image_allocation,
+             a->depth_image_view, VK_NULL_HANDLE);
+  image_free(&a->transfer, a->color_image, a->color_image_allocation,
+             a->color_image_view, VK_NULL_HANDLE);
   swapchain_image_views_destroy(a->device, a->image_views, a->num_images);
   free(a->images);
   swapchain_free(a->device, a->swapchain);
@@ -520,6 +592,11 @@ static bool app_init(app *a) {
     goto fail_vk_physical_device;
   }
 
+  a->msaa_samples = best_msaa_sample_count(a->physical_device);
+  if (a->msaa_samples > VK_SAMPLE_COUNT_16_BIT) {
+    a->msaa_samples = VK_SAMPLE_COUNT_16_BIT;
+  }
+
   if (!device_init(a->physical_device, a->surface, &a->device)) {
     LOG_ERROR("unable to create vulkan device");
     goto fail_vk_device;
@@ -559,11 +636,33 @@ static bool app_init(app *a) {
       &sharing_mode);
   assert(num_unique_indices > 0);
 
+  const struct aiScene *scene =
+      aiImportFile("resources/viking_room.obj",
+                   aiProcess_Triangulate | aiProcess_JoinIdenticalVertices |
+                       aiProcess_ImproveCacheLocality | aiProcess_GenUVCoords |
+                       aiProcess_OptimizeMeshes | aiProcess_OptimizeGraph |
+                       aiProcess_FlipUVs);
+  if (scene == NULL) {
+    LOG_ERROR("unable to import scene from file: %s", aiGetErrorString());
+    goto fail_model;
+  }
+
+  assert(scene->mNumMeshes == 1);
+  const struct aiMesh *mesh = scene->mMeshes[0];
+  a->ml = mesh_layout(mesh);
+
+  float *texcoords = texcoords_buffer(mesh);
+  u32 *model_indices = indices_buffer(mesh);
+  if (!texcoords || !model_indices) {
+    LOG_ERROR("unable to extract texcoords and indices data from model");
+    goto fail_model_buffers;
+  }
+
   if ((result =
            vmaCreateBuffer(a->vk_allocator,
                            &(VkBufferCreateInfo){
                                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                               .size = sizeof(vertices),
+                               .size = a->ml.vertex_buffer_size,
                                .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                .pQueueFamilyIndices = unique_queue_indices,
@@ -580,8 +679,16 @@ static bool app_init(app *a) {
     goto fail_vertex_buffer;
   }
 
+  if (!transfer_context_stage_to_buffer(
+          &a->transfer, a->vertex_buffer, a->ml.size_positions,
+          a->ml.offset_positions, mesh->mVertices)) {
+    LOG_ERROR("unable to stage vertex data to vertex buffer");
+    goto fail_stage_vertex_buffer;
+  }
+
   if (!transfer_context_stage_to_buffer(&a->transfer, a->vertex_buffer,
-                                        sizeof(vertices), 0, vertices)) {
+                                        a->ml.size_texcoords,
+                                        a->ml.offset_texcoords, texcoords)) {
     LOG_ERROR("unable to stage vertex data to vertex buffer");
     goto fail_stage_vertex_buffer;
   }
@@ -590,7 +697,7 @@ static bool app_init(app *a) {
            vmaCreateBuffer(a->vk_allocator,
                            &(VkBufferCreateInfo){
                                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                               .size = sizeof(vertex_indices),
+                               .size = a->ml.index_buffer_size,
                                .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                .sharingMode = sharing_mode,
@@ -608,11 +715,18 @@ static bool app_init(app *a) {
   }
 
   if (!transfer_context_stage_to_buffer(&a->transfer, a->index_buffer,
-                                        sizeof(vertex_indices), 0,
-                                        vertex_indices)) {
+                                        a->ml.index_buffer_size, 0,
+                                        model_indices)) {
     LOG_ERROR("unable to stage index data to index buffer");
     goto fail_stage_index_buffer;
   }
+
+  free(texcoords);
+  texcoords = NULL;
+  free(model_indices);
+  model_indices = NULL;
+  aiReleaseImport(scene);
+  scene = NULL;
 
   i32 num_uniform_buffers = 0;
   while (num_uniform_buffers < MAX_FRAMES_IN_FLIGHT) {
@@ -713,15 +827,39 @@ static bool app_init(app *a) {
     goto fail_descriptor_sets;
   }
 
-  if (!image_load_from_file(&a->transfer, "resources/plst.png", &a->texture,
-                            &a->texture_allocation, &a->texture_view)) {
-    LOG_ERROR("unable to load texture");
-    goto fail_image_load;
+  i32 num_command_pools = 0;
+  while (num_command_pools < MAX_FRAMES_IN_FLIGHT) {
+    if (!command_pool_create(a->device, indices.graphics,
+                             &a->command_pools[num_command_pools])) {
+      LOG_ERROR("unable to create %" PRIi32 "-th command pool",
+                num_command_pools + 1);
+      goto fail_command_pools;
+    }
+
+    if (!command_buffer_allocate(a->device, a->command_pools[num_command_pools],
+                                 VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1,
+                                 &a->command_buffers[num_command_pools])) {
+      LOG_ERROR("unable to allocate %" PRIi32
+                "-th command buffer from command pool",
+                num_command_pools + 1);
+      goto fail_command_pools;
+    }
+
+    ++num_command_pools;
   }
 
-  if (!sampler_create(a->physical_device, a->device, &a->texture_sampler)) {
-    LOG_ERROR("unable to create texture sampler");
-    goto fail_sampler;
+  if (!image_load_from_file(
+          a->physical_device, &a->transfer, "resources/viking_room.png",
+          VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          &(mipmap_context){
+              .mip_levels = INT32_MAX,
+              .blit_command_pool = a->command_pools[0],
+              .blit_command_buffer = a->command_buffers[0],
+          },
+          &a->texture, &a->texture_allocation, &a->texture_view,
+          &a->texture_sampler)) {
+    LOG_ERROR("unable to load texture");
+    goto fail_image_load;
   }
 
   for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -767,27 +905,6 @@ static bool app_init(app *a) {
     goto fail_vk_swapchain;
   }
 
-  i32 num_command_pools = 0;
-  while (num_command_pools < MAX_FRAMES_IN_FLIGHT) {
-    if (!command_pool_create(a->device, indices.graphics,
-                             &a->command_pools[num_command_pools])) {
-      LOG_ERROR("unable to create %" PRIi32 "-th command pool",
-                num_command_pools + 1);
-      goto fail_command_pools;
-    }
-
-    if (!command_buffer_allocate(a->device, a->command_pools[num_command_pools],
-                                 VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1,
-                                 &a->command_buffers[num_command_pools])) {
-      LOG_ERROR("unable to allocate %" PRIi32
-                "-th command buffer from command pool",
-                num_command_pools + 1);
-      goto fail_command_pools;
-    }
-
-    ++num_command_pools;
-  }
-
   u32 num_sync_objects = 0;
   while (num_sync_objects < MAX_FRAMES_IN_FLIGHT) {
     if (!present_sync_objects_init(a->device,
@@ -815,16 +932,15 @@ fail_present_sync_objects:
   for (u32 i = 0; i < num_sync_objects; ++i) {
     present_sync_objects_free(a->device, &a->sync_objects[i]);
   }
-fail_command_pools:
+  free_swapchain_related(a);
+fail_vk_swapchain:
+  image_free(&a->transfer, a->texture, a->texture_allocation, a->texture_view,
+             a->texture_sampler);
+fail_image_load:
   for (i32 i = 0; i < num_command_pools; ++i) {
     command_pool_free(a->device, a->command_pools[i]);
   }
-  free_swapchain_related(a);
-fail_vk_swapchain:
-  sampler_free(a->device, a->texture_sampler);
-fail_sampler:
-  image_free(&a->transfer, a->texture, a->texture_allocation, a->texture_view);
-fail_image_load:
+fail_command_pools:
 fail_descriptor_sets:
   vkDestroyDescriptorSetLayout(a->device, a->descriptor_set_layout, NULL);
 fail_descriptor_layout:
@@ -843,6 +959,11 @@ fail_stage_vertex_buffer:
   vmaDestroyBuffer(a->vk_allocator, a->vertex_buffer,
                    a->vertex_buffer_allocation);
 fail_vertex_buffer:
+fail_model_buffers:
+  free(texcoords);
+  free(model_indices);
+  aiReleaseImport(scene);
+fail_model:
   transfer_context_free(&a->transfer);
 fail_transfer:
   vma_destroy(a->vk_allocator);
@@ -872,8 +993,8 @@ static void app_free(app *a) {
     command_pool_free(a->device, a->command_pools[i]);
   }
   free_swapchain_related(a);
-  sampler_free(a->device, a->texture_sampler);
-  image_free(&a->transfer, a->texture, a->texture_allocation, a->texture_view);
+  image_free(&a->transfer, a->texture, a->texture_allocation, a->texture_view,
+             a->texture_sampler);
   vkDestroyDescriptorSetLayout(a->device, a->descriptor_set_layout, NULL);
   vkDestroyDescriptorPool(a->device, a->descriptor_pool, NULL);
   for (i32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -955,11 +1076,11 @@ static void app_loop(app *a) {
       glm_mat4_identity(mat.view);
       glm_mat4_identity(mat.model);
 
-      double time = glfwGetTime();
+      double time = glfwGetTime() * 0.0001;
       glm_perspective(glm_rad(45.0), (float)a->extent.width / a->extent.height,
                       0.1, 10.0, mat.proj);
       mat.proj[1][1] *= -1;
-      glm_lookat((vec3){1, 1, 1}, (vec3){0, 0, 0}, (vec3){0, 0, 1}, mat.view);
+      glm_lookat((vec3){2, 2, 2}, (vec3){0, 0, 0}, (vec3){0, 0, 1}, mat.view);
       glm_rotate_make(mat.model, time * GLM_PI_4, (vec3){0, 0, 1});
 
       memcpy(a->uniform_buffer_allocation_info[frame_index].pMappedData, &mat,
@@ -1027,15 +1148,15 @@ static void app_loop(app *a) {
         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           a->graphics_pipeline);
         vkCmdBindVertexBuffers(command_buffer, 0, 1, &a->vertex_buffer,
-                               &(VkDeviceSize){0});
+                               (VkDeviceSize[]){a->ml.offset_positions});
+        vkCmdBindVertexBuffers(command_buffer, 1, 1, &a->vertex_buffer,
+                               (VkDeviceSize[]){a->ml.offset_texcoords});
         vkCmdBindIndexBuffer(command_buffer, a->index_buffer, 0,
                              VK_INDEX_TYPE_UINT32);
         vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 a->graphics_pipeline_layout, 0, 1,
                                 &a->descriptor_sets[frame_index], 0, NULL);
-        vkCmdDrawIndexed(command_buffer,
-                         sizeof(vertex_indices) / sizeof(vertex_indices[0]), 1,
-                         0, 0, 0);
+        vkCmdDrawIndexed(command_buffer, a->ml.num_indices, 1, 0, 0, 0);
       }
 
       vkCmdEndRenderPass(command_buffer);

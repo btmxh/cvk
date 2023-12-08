@@ -28,5 +28,5 @@ bool transfer_context_stage_to_buffer(const transfer_context *c,
                                       VkBuffer buffer, i32 size, i32 offset,
                                       const void *data);
 bool transfer_context_stage_linear_data_to_2d_image(
-    const transfer_context *c, VkImage image, VkRect2D region,
+    const transfer_context *c, VkImage image, i32 num_levels, VkRect2D region,
     const void *image_pixels, VkFormat format, VkImageLayout transition_layout);

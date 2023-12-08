@@ -3,6 +3,8 @@
 #include "types.h"
 #include <vulkan/vulkan_core.h>
 
+VkSampleCountFlagBits best_msaa_sample_count(VkPhysicalDevice physical_device);
+
 VkPhysicalDevice physical_device_pick(VkInstance instance,
                                       VkSurfaceKHR surface);
 

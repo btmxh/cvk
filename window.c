@@ -257,6 +257,7 @@ void swapchain_image_views_destroy(VkDevice device, VkImageView *views,
 bool framebuffers_init(VkDevice device, u32 num_images,
                        VkImageView *image_views, const VkExtent2D *extent,
                        VkRenderPass render_pass, VkFramebuffer **framebuffers,
+                       VkImageView color_image_view,
                        VkImageView depth_image_view) {
   *framebuffers = malloc(num_images * sizeof(VkFramebuffer));
   if (!*framebuffers) {
@@ -271,11 +272,13 @@ bool framebuffers_init(VkDevice device, u32 num_images,
              device,
              &(VkFramebufferCreateInfo){
                  .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-                 .attachmentCount = depth_image_view != VK_NULL_HANDLE ? 2 : 1,
-                 .pAttachments = depth_image_view != VK_NULL_HANDLE
-                                     ? (VkImageView[]){image_views[counter],
-                                                       depth_image_view}
-                                     : &image_views[counter],
+                 .attachmentCount = 3,
+                 .pAttachments =
+                     (VkImageView[]){
+                         color_image_view,
+                         depth_image_view,
+                         image_views[counter],
+                     },
                  .width = extent->width,
                  .height = extent->height,
                  .renderPass = render_pass,

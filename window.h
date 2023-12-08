@@ -34,6 +34,7 @@ void swapchain_image_views_destroy(VkDevice device, VkImageView *views,
 bool framebuffers_init(VkDevice device, u32 num_images,
                        VkImageView *image_views, const VkExtent2D *extent,
                        VkRenderPass render_pass, VkFramebuffer **framebuffers,
+                       VkImageView color_image_view,
                        VkImageView depth_image_view);
 void framebuffers_free(VkDevice device, u32 num_images,
                        VkFramebuffer *framebuffers);
